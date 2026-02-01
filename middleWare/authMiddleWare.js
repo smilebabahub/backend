@@ -1,6 +1,6 @@
-const jwt = require("jsonwebtoken");
+import { verify } from "jsonwebtoken";
 
-module.exports = (req, res, next) => {
+export default (req, res, next) => {
   const token = req.cookies.accessToken;
 
   if (!token) {
@@ -8,7 +8,7 @@ module.exports = (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = verify(token, process.env.JWT_SECRET);
     req.user = decoded;
     next();
   } catch (err) {

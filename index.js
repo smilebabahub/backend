@@ -1,30 +1,29 @@
-require("dotenv").config();
-const express = require("express");
-const helmet = require("helmet");
-const morgan = require("morgan");
-const bodyParser = require("body-parser");
-const cors = require("cors");
-const connectDB = require("./config/db.js");
-const cookieParser = require("cookie-parser");
-const authRoute = require("./routes/authRoute.js");
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import bodyParser from "body-parser";
+import helmet from "helmet";
+import morgan from "morgan";
+import connectDB from "./config/db.js";
+import cookieParser from "cookie-parser";
+import authRoute from "./routes/authRoute.js";
+
 //DATA IMPORTS
 
 //CONFIGURATIONS
 const app = express();
 app.use(express.json());
-app.use(cors());
 app.use(helmet());
 app.use(helmet.crossOriginResourcePolicy({ policy: "cross-origin" }));
 app.use(morgan("common"));
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: false }));
-app.use(cookieParser());
-
-app.use("/smilebaba/auth", authRoute);
+app.use(cors());
 
 const PORT = process.env.PORT || 3001;
 
 //ROUTES
+app.use("/smilebaba/auth", authRoute);
 
 //START SERVER
 const start = async () => {
