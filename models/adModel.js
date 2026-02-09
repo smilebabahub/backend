@@ -1,17 +1,13 @@
-import mongoose from "mongoose"
+import mongoose from "mongoose";
 
 const adSchema = new mongoose.Schema(
   {
-    title: {
-      type: String,
-      required: true,
-      trim: true,
-    },
+    title: { type: String, required: true },
 
     category: {
-      main: { type: String, required: true }, // vehicles
-      sub: { type: String, required: true }, // cars
-      type: { type: String }, // Toyota
+      main: String,
+      sub: String,
+      type: String,
     },
 
     images: [
@@ -22,14 +18,11 @@ const adSchema = new mongoose.Schema(
     ],
 
     location: {
-      region: { type: String, required: true }, // Greater Accra
-      city: { type: String, required: true }, // Madina
+      region: String,
+      city: String,
     },
 
-    description: {
-      type: String,
-      required: true,
-    },
+    description: String,
 
     negotiable: {
       type: String,
@@ -37,37 +30,28 @@ const adSchema = new mongoose.Schema(
       default: "not_sure",
     },
 
-    price: {
-      type: Number,
-      required: true,
-    },
+    price: Number,
 
     contact: {
-      name: { type: String, required: true },
-      phone: { type: String, required: true },
+      name: String,
+      phone: String,
     },
 
-    deliveryOption: {
-      type: String,
-    },
+    deliveryOption: String,
 
     subscription: {
       plan: {
         type: String,
         enum: ["daily", "weekly", "monthly"],
-        required: true,
       },
-      package: {
-        type: String, // basic | standard | premium
-        required: true,
-      },
+      package: String,
       expiresAt: Date,
     },
 
-    user: {
+    postedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true,
+      required: false, // guests allowed
     },
 
     isActive: {
@@ -78,5 +62,4 @@ const adSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-const add = mongoose.model("Ad", adSchema);
-export default add;
+export default mongoose.model("Ad", adSchema);

@@ -1,4 +1,4 @@
-import Ad from "../models/adModel"   ;
+import Ad from "../models/Ad.js";
 
 export const createAd = async (req, res) => {
   try {
@@ -19,14 +19,23 @@ export const createAd = async (req, res) => {
       packageType,
     } = req.body;
 
-    if (!title || !categoryMain || !categorySub || !region || !city) {
-      return res.status(400).json({ message: "Missing required fields" });
+    if (!title || !price || !contactPhone) {
+      return res.status(400).json({
+        message: "Required fields missing",
+      });
     }
 
     const images = req.files?.map((file, index) => ({
       url: `/uploads/${file.filename}`,
       isCover: index === 0,
     }));
+
+    const expiresAt =
+      plan === "daily"
+        ? new Date(Date.now() + 24 * 60 * 60 * 1000)
+        : plan === "weekly"
+          ? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+          : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
     const ad = await Ad.create({
       title,
@@ -48,8 +57,9 @@ export const createAd = async (req, res) => {
       subscription: {
         plan,
         package: packageType,
+        expiresAt,
       },
-      user: req.user.userId,
+      postedBy: req.user?.userId || null, // guest-safe
     });
 
     res.status(201).json({
@@ -57,9 +67,6 @@ export const createAd = async (req, res) => {
       ad,
     });
   } catch (error) {
-    console.error(error);
     res.status(500).json({ message: "Server error" });
   }
 };
-
-
