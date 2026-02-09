@@ -22,11 +22,13 @@ const subscriptionSchema = new mongoose.Schema({
   expiresAt: Date,
 });
 
+
 const userSchema = new mongoose.Schema(
   {
     name: {
       type: String,
       trim: true,
+      required: true,
     },
 
     email: {
@@ -34,13 +36,19 @@ const userSchema = new mongoose.Schema(
       unique: true,
       sparse: true,
       lowercase: true,
+      required: true,
     },
 
     password: {
       type: String,
+      required: true,
+      min: 8,
     },
 
-    phone: String,
+    phone: {
+      type: String,
+      required: true,
+    },
 
     role: {
       type: String,

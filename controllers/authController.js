@@ -6,12 +6,15 @@ import {
   generateRefreshToken,
 } from "../utils/generateTokens.js";
 
+
+//METHOD: POST, UNPROTECTED
+//auth/register
 // REGISTER (so user will be a Guest initially, and later be upgraded to a vendor upon his subscription)
 export const register = async (req, res) => {
   try {
     const { name, email, password, phone } = req.body;
 
-    if (!name || !email || !password) {
+    if (!name || !email || !password || !phone) {
       return res.status(400).json({
         message: "Required fields missing",
       });
@@ -33,58 +36,37 @@ export const register = async (req, res) => {
       password: hashedPassword,
       phone,
       role: "guest",
+      subscription: null,
     });
 
     res.status(201).json({
-      message: "Registration successful",
+      message: "Registration successful", user: user
     });
   } catch (error) {
     res.status(500).json({
       message: "Server error",
     });
   }
-
-  const userExists = await User.findOne({ email });
-  if (userExists) {
-    return res.status(400).json({ message: "User already exists" });
-  }
-
-  const hashedPassword = await bcrypt.hash(password, 10);
-
-  const newUser = await User.create({
-    name,
-    email,
-    phone,
-    password: hashedPassword,
-    role: "guest",
-    subscription: null,
-  });
-
-  return res.status(201).json({
-    message: "User created successfully",
-    userId: newUser._id,
-  });
 };
 
+
+
+
+//METHOD: POST, UNPROTECTED
+//smilebaba/auth/login
 //  LOGIN, this will work for both registered and guest users for their logins into the system
 export const login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
     const user = await User.findOne({ email });
-
     if (!user) {
-      return res.status(400).json({
-        message: "Invalid credentials",
-      });
+      return res.status(400).json({ message: "Invalid credentials" });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
-
     if (!isMatch) {
-      return res.status(400).json({
-        message: "Invalid credentials",
-      });
+      return res.status(400).json({ message: "Invalid credentials" });
     }
 
     const accessToken = generateAccessToken(user);
@@ -93,18 +75,18 @@ export const login = async (req, res) => {
     res.cookie("accessToken", accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
+      sameSite: process.env.NODE_ENV === "production" ? "strict" : "lax",
       maxAge: 24 * 60 * 60 * 1000,
     });
 
     res.cookie("refreshToken", refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
+      sameSite: process.env.NODE_ENV === "production" ? "strict" : "lax",
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
-    res.json({
+    res.status(200).json({
       message: "Login successful",
       user: {
         id: user._id,
@@ -113,72 +95,40 @@ export const login = async (req, res) => {
       },
     });
   } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+
+
+
+
+//METHOD: POST, UNPROTECTED
+//smilebaba/auth/logout
+// Our logout logic lies here.
+export const logout = async (req, res) => {
+  try {
+      res.clearCookie("accessToken");
+      res.clearCookie("refreshToken");
+    
+      res.json({
+        message: "Logged out successfully",
+      });
+  } catch (error) {
     res.status(500).json({
       message: "Server error",
     });
   }
-
-  const existingUser = await User.findOne({ email });
-  if (!existingUser) {
-    return res.status(400).json({ message: "User not found" });
-  }
-
-  const isPasswordCorrect = await bcrypt.compare(
-    password,
-    existingUser.password,
-  );
-
-  if (!isPasswordCorrect) {
-    return res.status(400).json({ message: "Incorrect password" });
-  }
-
-  const accessToken = jwt.sign(
-    { userId: existingUser._id, role: existingUser.role },
-    process.env.JWT_ACCESS_SECRET,
-    { expiresIn: "1d" },
-  );
-
-  const refreshToken = jwt.sign(
-    { userId: existingUser._id },
-    process.env.JWT_REFRESH_SECRET,
-    { expiresIn: "7d" },
-  );
-
-  res.cookie("accessToken", accessToken, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    maxAge: 24 * 60 * 60 * 1000,
-  });
-
-  res.cookie("refreshToken", refreshToken, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    maxAge: 7 * 24 * 60 * 60 * 1000,
-  });
-
-  return res.status(200).json({
-    message: "Login successful",
-    user: {
-      id: existingUser._id,
-      name: existingUser.name,
-      email: existingUser.email,
-      phone: existingUser.phone,
-      role: existingUser.role,
-      subscription: existingUser.subscription,
-    },
-  });
 };
 
-// Our logout logic lies here.
-export const logout = (req, res) => {
-  res.clearCookie("accessToken");
-  res.clearCookie("refreshToken");
 
-  res.json({
-    message: "Logged out successfully",
-  });
-};
 
+
+
+
+//METHOD: POST, UNPROTECTED
+//smilebaba/auth/refresh
 // REFRESH TOKEN, to renew the access tokens when they expires
 export const refresh = (req, res) => {
   const token = req.cookies.refreshToken;
