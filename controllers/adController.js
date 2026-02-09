@@ -28,6 +28,13 @@ export const createAd = async (req, res) => {
       isCover: index === 0,
     }));
 
+    const expiresAt =
+      plan === "daily"
+        ? new Date(Date.now() + 24 * 60 * 60 * 1000)
+        : plan === "weekly"
+          ? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+          : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
     const ad = await Ad.create({
       title,
       category: {
@@ -48,8 +55,9 @@ export const createAd = async (req, res) => {
       subscription: {
         plan,
         package: packageType,
+        expiresAt,
       },
-      user: req.user.userId,
+      postedBy: req.user?.userId || null, // guest-safe
     });
 
     res.status(201).json({
@@ -57,9 +65,6 @@ export const createAd = async (req, res) => {
       ad,
     });
   } catch (error) {
-    console.error(error);
     res.status(500).json({ message: "Server error" });
   }
 };
-
-

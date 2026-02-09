@@ -11,11 +11,19 @@ import cookieParser from "cookie-parser";
 import connectDB from "./config/db.js";
 import authRoute from "./routes/authRoute.js";
 import adRoute from "./routes/adRoute.js";
+import productRoute from "./routes/productRoute.js";
+import paymentRoute from "./routes/paymentRoute.js";
 
 // CONFIGURATIONS
 const app = express();
 
 app.use(express.json());
+app.use(
+  cors({
+    origin: "http://localhost:3000",
+    credentials: true,
+  }),
+);
 app.use(helmet());
 app.use(helmet.crossOriginResourcePolicy({ policy: "cross-origin" }));
 app.use(morgan("common"));
@@ -26,6 +34,8 @@ app.use(cookieParser());
 // ROUTES
 app.use("/smilebaba/auth", authRoute);
 app.use("/smilebaba/ads", adRoute);
+app.use("/smilebaba/products", productRoute);
+app.use("/smilebaba/payment", paymentRoute);
 
 const PORT = process.env.PORT || 3001;
 

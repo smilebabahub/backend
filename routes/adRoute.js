@@ -1,12 +1,9 @@
-
 import express from "express";
-import upload from "../middleWare/uploadMiddleware.js";
-import auth from "../middleWare/authMiddleware.js"
+import upload from "../middleware/uploadMiddleware.js";
+import { createAd } from "../controllers/adController.js";
 
-import { createAd} from  "../controllers/adController.js";
-const router =  express.Router();
+const router = express.Router();
 
-
-router.post("/create", auth, upload.array("images", 5), createAd);
+router.post("/create", upload.array("images", 5), createAd);
 
 export default router;

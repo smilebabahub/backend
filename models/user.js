@@ -9,15 +9,17 @@ const subscriptionSchema = new mongoose.Schema({
     type: String,
     enum: ["monthly", "yearly"],
   },
-  price: {
-    type: Number,
+
+  price: Number,
+
+  status: {
+    type: String,
+    enum: ["active", "expired", "cancelled"],
+    default: "active",
   },
-  startedAt: {
-    type: Date,
-  },
-  expiresAt: {
-    type: Date,
-  },
+
+  startedAt: Date,
+  expiresAt: Date,
 });
 
 const userSchema = new mongoose.Schema(
@@ -38,17 +40,19 @@ const userSchema = new mongoose.Schema(
       type: String,
     },
 
-    phone: {
-      type: String,
-    },
+    phone: String,
 
     role: {
       type: String,
-      enum: ["guest", "registered"],
+      enum: ["guest", "vendor", "admin"],
       default: "guest",
     },
 
-    // Only registered users will have this filled, the guests will have null, please take note
+    isSubscribed: {
+      type: Boolean,
+      default: false,
+    },
+
     subscription: {
       type: subscriptionSchema,
       default: null,
@@ -57,6 +61,4 @@ const userSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-const User = mongoose.model("User", userSchema);
-
-export default User;
+export default mongoose.model("User", userSchema);
