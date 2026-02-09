@@ -1,6 +1,9 @@
-import { Router } from "express";
+import express from "express";
 import {
-  register, login, logout, refresh,
+  register,
+  login,
+  logout,
+  refresh,
 } from "../controllers/authController.js";
 
 

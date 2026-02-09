@@ -1,5 +1,28 @@
 import mongoose from "mongoose";
 
+const subscriptionSchema = new mongoose.Schema({
+  plan: {
+    type: String,
+    enum: ["basic", "standard", "premium"],
+  },
+
+  billingCycle: {
+    type: String,
+    enum: ["monthly", "yearly"],
+  },
+
+  price: Number,
+
+  status: {
+    type: String,
+    enum: ["active", "expired", "cancelled"],
+    default: "active",
+  },
+
+  startedAt: Date,
+  expiresAt: Date,
+});
+
 const userSchema = new mongoose.Schema(
   {
     name: {
@@ -7,24 +30,44 @@ const userSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+
     email: {
       type: String,
       required: true,
       unique: true,
       lowercase: true,
     },
+
     password: {
       type: String,
       required: true,
     },
-    phone: {
+
+    phone: String,
+
+    role: {
       type: String,
-      required: true,
+      enum: ["guest", "vendor", "admin"],
+      default: "guest",
+    },
+
+    isSubscribed: {
+      type: Boolean,
+      default: false,
+    },
+
+    subscription: {
+      type: subscriptionSchema,
+      default: null,
     },
   },
   { timestamps: true },
 );
 
+<<<<<<< HEAD
 
 const User = mongoose.model('User', userSchema)
 export default User;
+=======
+export default mongoose.model("User", userSchema);
+>>>>>>> 719ad79e1711dc8345e45aeafa8dda788dfa0609

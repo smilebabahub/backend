@@ -1,17 +1,19 @@
-import { verify } from "jsonwebtoken";
+import jwt from "jsonwebtoken";
 
-export default (req, res, next) => {
-  const token = req.cookies.accessToken;
+const authMiddleware = (req, res, next) => {
+  const token = req.cookies?.accessToken;
 
   if (!token) {
     return res.status(401).json({ message: "Not authenticated" });
   }
 
   try {
-    const decoded = verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
+    const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
+    req.user = decoded; // { userId }
     next();
   } catch (err) {
-    return res.status(401).json({ message: "Invalid token" });
+    return res.status(401).json({ message: "Invalid or expired token" });
   }
 };
+
+export default authMiddleware;
