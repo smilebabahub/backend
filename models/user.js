@@ -64,10 +64,4 @@ const userSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-<<<<<<< HEAD
-
-const User = mongoose.model('User', userSchema)
-export default User;
-=======
 export default mongoose.model("User", userSchema);
->>>>>>> 719ad79e1711dc8345e45aeafa8dda788dfa0609
