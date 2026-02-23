@@ -5,7 +5,7 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "dev": "nodemon index.js",
+    "dev": "nodemon ",
     "start": "node index.js"
   },
   "dependencies": {
@@ -23,6 +23,10 @@
     "morgan": "^1.10.1",
     "multer": "^2.0.2",
     "socket.io": "^4.8.3",
-    "ssl": "^1.0.0"
+    "ssl": "^1.0.0",
+    "validator": "^13.15.26"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
   }
 }

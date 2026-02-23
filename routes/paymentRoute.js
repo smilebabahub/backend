@@ -1,5 +1,5 @@
 import express from "express";
-import auth from "../middleware/auth.js";
+
 import {
   initializePayment,
   verifyPayment,
@@ -8,7 +8,7 @@ import {
 
 const router = express.Router();
 
-router.post("/initialize", auth, initializePayment);
+router.post("/initialize", initializePayment);
 
 router.get("/verify", verifyPayment);
 
