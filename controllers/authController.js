@@ -12,39 +12,51 @@ import {
 // REGISTER (so user will be a Guest initially, and later be upgraded to a vendor upon his subscription)
 export const register = async (req, res) => {
   try {
-    const { name, email, password, phone } = req.body;
+    const { username, email, password, phone, country } = req.body;
 
-    if (!name || !email || !password || !phone) {
+    if (!username || !email || !password) {
       return res.status(400).json({
         message: "Required fields missing",
       });
     }
 
-    const existingUser = await User.findOne({ email });
+    // Check if email or username already exists
+    const existingUser = await User.findOne({
+      $or: [{ email }, { username }],
+    });
 
     if (existingUser) {
       return res.status(400).json({
-        message: "User already exists",
+        message: "Email or username already in use",
       });
     }
 
+    // 🔐 HASH PASSWORD HERE
     const hashedPassword = await bcrypt.hash(password, 12);
 
     const user = await User.create({
-      name,
+      username,
       email,
       password: hashedPassword,
       phone,
+      country,
+      ipAddress: req.ip,
       role: "guest",
       subscription: null,
     });
 
     res.status(201).json({
-      message: "Registration successful", user: user
+      message: "Registration successful",
+      user: {
+        id: user._id,
+        username: user.username,
+        email: user.email,
+      },
     });
   } catch (error) {
+    console.log("REGISTER ERROR:", error);
     res.status(500).json({
-      message: "Server error",
+      message: error.message,
     });
   }
 };

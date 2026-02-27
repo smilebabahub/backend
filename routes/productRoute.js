@@ -1,8 +1,8 @@
 import express from "express";
-import upload from "../middleware/uploadMiddleware.js";
-import protect from "../middleware/protect.js";
-import subscribedOnly from "../middleware/subscriptionGuard.js";
-import { vendorOnly } from "../middleware/roleGuard.js";
+import upload from "../middleWare/uploadMiddleware.js";
+import protect from "../middleWare/protect.js";
+import subscribedOnly from "../middleWare/subscriptionGuard.js";
+import { vendorOnly } from "../middleWare/roleGuard.js";
 import { createProduct } from "../controllers/productController.js";
 
 const router = express.Router();
