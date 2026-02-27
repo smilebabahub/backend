@@ -1,7 +1,7 @@
 import express from "express";
 import upload from "../middleware/uploadMiddleware.js";
 import protect from "../middleware/protect.js";
-import subscribedOnly from "../middleware/subscribedOnly.js";
+import subscribedOnly from "../middleware/subscriptionGuard.js";
 import { vendorOnly } from "../middleware/roleGuard.js";
 import { createProduct } from "../controllers/productController.js";
 

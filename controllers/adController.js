@@ -1,4 +1,4 @@
-import Ad from "../models/Ad.js";
+import Ad from "../models/adModel.js"   ;
 
 export const createAd = async (req, res) => {
   try {
@@ -19,10 +19,8 @@ export const createAd = async (req, res) => {
       packageType,
     } = req.body;
 
-    if (!title || !price || !contactPhone) {
-      return res.status(400).json({
-        message: "Required fields missing",
-      });
+    if (!title || !categoryMain || !categorySub || !region || !city) {
+      return res.status(400).json({ message: "Missing required fields" });
     }
 
     const images = req.files?.map((file, index) => ({

@@ -6,8 +6,7 @@ import {
   refresh,
 } from "../controllers/authController.js";
 
-
-const router = Router();
+const router = express.Router();
 
 router.post("/register", register);
 router.post("/login", login);

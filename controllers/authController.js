@@ -6,12 +6,15 @@ import {
   generateRefreshToken,
 } from "../utils/generateTokens.js";
 
+
+//METHOD: POST, UNPROTECTED
+//auth/register
 // REGISTER (so user will be a Guest initially, and later be upgraded to a vendor upon his subscription)
 export const register = async (req, res) => {
   try {
     const { name, email, password, phone } = req.body;
 
-    if (!name || !email || !password) {
+    if (!name || !email || !password || !phone) {
       return res.status(400).json({
         message: "Required fields missing",
       });
@@ -33,10 +36,11 @@ export const register = async (req, res) => {
       password: hashedPassword,
       phone,
       role: "guest",
+      subscription: null,
     });
 
     res.status(201).json({
-      message: "Registration successful",
+      message: "Registration successful", user: user
     });
   } catch (error) {
     res.status(500).json({
@@ -45,25 +49,24 @@ export const register = async (req, res) => {
   }
 };
 
+
+
+
+//METHOD: POST, UNPROTECTED
+//smilebaba/auth/login
 //  LOGIN, this will work for both registered and guest users for their logins into the system
 export const login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
     const user = await User.findOne({ email });
-
     if (!user) {
-      return res.status(400).json({
-        message: "Invalid credentials",
-      });
+      return res.status(400).json({ message: "Invalid credentials" });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
-
     if (!isMatch) {
-      return res.status(400).json({
-        message: "Invalid credentials",
-      });
+      return res.status(400).json({ message: "Invalid credentials" });
     }
 
     const accessToken = generateAccessToken(user);
@@ -72,18 +75,18 @@ export const login = async (req, res) => {
     res.cookie("accessToken", accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
+      sameSite: process.env.NODE_ENV === "production" ? "strict" : "lax",
       maxAge: 24 * 60 * 60 * 1000,
     });
 
     res.cookie("refreshToken", refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
+      sameSite: process.env.NODE_ENV === "production" ? "strict" : "lax",
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
-    res.json({
+    res.status(200).json({
       message: "Login successful",
       user: {
         id: user._id,
@@ -92,24 +95,40 @@ export const login = async (req, res) => {
       },
     });
   } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+
+
+
+
+//METHOD: POST, UNPROTECTED
+//smilebaba/auth/logout
+// Our logout logic lies here.
+export const logout = async (req, res) => {
+  try {
+      res.clearCookie("accessToken");
+      res.clearCookie("refreshToken");
+    
+      res.json({
+        message: "Logged out successfully",
+      });
+  } catch (error) {
     res.status(500).json({
       message: "Server error",
     });
   }
 };
 
-// Our logout logic lies here.
-export const logout = (req, res) => {
-  res.clearCookie("accessToken");
-  res.clearCookie("refreshToken");
-
-  res.json({
-    message: "Logged out successfully",
-  });
-};
 
 
 
+
+
+//METHOD: POST, UNPROTECTED
+//smilebaba/auth/refresh
 // REFRESH TOKEN, to renew the access tokens when they expires
 export const refresh = (req, res) => {
   const token = req.cookies.refreshToken;
