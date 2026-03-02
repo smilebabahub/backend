@@ -53,6 +53,8 @@ const userSchema = new mongoose.Schema(
       required: true,
       minlength: 6,
     },
+    passwordResetToken: String,
+    passwordResetExpires: Date,
 
     profilePicture: {
       type: String, // Cloudinary or image URL
@@ -64,23 +66,19 @@ const userSchema = new mongoose.Schema(
       trim: true,
     },
 
-    country: {
-      type: String,
-      trim: true,
-    },
-    city: {
-      type: String,
-    },
-
-    // TRACKING INFO
-
-    ipAddress: {
-      type: String,
-    },
-
-    location: {
-      type: String,
-    },
+    loginHistory: [
+      {
+        ip: String,
+        country: String,
+        city: String,
+        location: String,
+        userAgent: String,
+        date: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
 
     cartItems: [
       {

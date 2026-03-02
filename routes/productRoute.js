@@ -1,20 +1,30 @@
 import express from "express";
 import upload from "../middleWare/uploadMiddleware.js";
 import protect from "../middleWare/protect.js";
-import subscribedOnly from "../middleWare/subscriptionGuard.js";
-import { vendorOnly } from "../middleWare/roleGuard.js";
-import { createProduct } from "../controllers/productController.js";
+import { adminOnly } from "../middleWare/roleGuard.js";
+
+import {
+  createProduct,
+  getAllProducts,
+  getSingleProduct,
+  updateProduct,
+  deleteProduct,
+} from "../controllers/productController.js";
 
 const router = express.Router();
 
-// so this is where we insist on strictness. subscribed vendors only
-router.post(
-  "/create",
-  protect,
-  vendorOnly,
-  subscribedOnly,
-  upload.array("images", 5),
-  createProduct,
-);
+// Everyone can view
+router.get("/", getAllProducts);
+router.get("/:id", getSingleProduct);
+
+//CREATE (Any Logged-in User)
+
+router.post("/create", protect, upload.array("images", 5), createProduct);
+
+//UPDATE (Owner Vendor or Admin)
+router.put("/:id", protect, upload.array("images", 5), updateProduct);
+
+//DELETE (Owner Vendor or Admin)
+router.delete("/:id", protect, deleteProduct);
 
 export default router;
