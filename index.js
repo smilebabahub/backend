@@ -15,7 +15,8 @@ import authRoute from "./routes/authRoute.js";
 //import adRoute from "./routes/adRoute.js";
 import productRoute from "./routes/productRoute.js";
 import paymentRoute from "./routes/paymentRoute.js";
-import { Socket } from "dgram";
+import chatRoute from "./routes/chatRoute.js";
+import Message from "./models/Message.js";
 
 //CONFIGURATIONS
 const app = express();
@@ -44,23 +45,51 @@ app.use("/smilebaba/auth", authRoute);
 // app.use("/smilebaba/ads", adRoute);
 app.use("/smilebaba/products", productRoute);
 app.use("/smilebaba/payment", paymentRoute);
+app.use("/smilebaba/chat", chatRoute);
 
 const PORT = process.env.PORT || 3001;
 
 //creating socket server
+
 const io = new Server(server, {
   cors: {
     origin: "http://localhost:5173",
-    methods: ["POST", "GET"],
+    methods: ["GET", "POST"],
+    credentials: true,
   },
 });
 
-io.on("connection", (Socket) => {
-  console.log(`a user connected with id ${Socket.id}`);
+io.on("connection", (socket) => {
+  console.log(`User connected: ${socket.id}`);
 
-  Socket.on("send_message", (data) => {
-    console.log("message received:", data);
-    Socket.broadcast.emit("receive_message", data);
+  // Join private room
+  socket.on("join_room", (room) => {
+    socket.join(room);
+    console.log(`User joined room: ${room}`);
+  });
+
+  // Send private message
+  socket.on("send_message", async (data) => {
+    try {
+      const { room, sender, receiver, text } = data;
+
+      // Save to DB
+      const newMessage = await Message.create({
+        room,
+        sender,
+        receiver,
+        text,
+      });
+
+      // Send to both users in room
+      io.to(room).emit("receive_message", newMessage);
+    } catch (error) {
+      console.error("Message error:", error);
+    }
+  });
+
+  socket.on("disconnect", () => {
+    console.log("User disconnected");
   });
 });
 
