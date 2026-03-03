@@ -11,6 +11,7 @@ import {
 import axios from "axios";
 import user from "../models/user.js";
 
+//this function makes an API call to the geoapify API to get the IP address and the geolocation
 const getLocationFromIP = async (ip) => {
   try {
     const response = await axios.get(
@@ -42,6 +43,7 @@ export const register = async (req, res) => {
       return res.status(400).json({ message: "Required fields missing" });
     }
 
+    // here, we're extracting the value to be passed to the geolocation function to fetch the IP address and the geolocations. works for both the register and the login functions
     const ip =
       req.headers["x-forwarded-for"]?.split(",").shift() ||
       req.socket?.remoteAddress;
@@ -55,6 +57,8 @@ export const register = async (req, res) => {
       email,
       password: hashedPassword,
       phone,
+
+      // so instead of overiding IP and location anytime a users logs in, we want to store and keep track of it, so we put it inside an array called login history
       loginHistory: [
         {
           ip,
@@ -65,7 +69,18 @@ export const register = async (req, res) => {
         },
       ],
     });
-    res.status(201).json(user);
+
+    res
+      .status(201)
+      .json({
+        message: "User registered successfully",
+        username: user.username,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        profilePicture: user.profilePicture,
+        cartItems: user.cartItems,
+      });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -109,6 +124,7 @@ export const login = async (req, res) => {
     const accessToken = generateAccessToken(user);
     const refreshToken = generateRefreshToken(user);
 
+    // here, we're using the http cookies to keep track of our tokens and its payloads which we'll be needing later for our middleware validations
     res.cookie("accessToken", accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
@@ -126,7 +142,12 @@ export const login = async (req, res) => {
     res.json({
       message: "Login successful",
       accessToken: accessToken,
-      user,
+      username: user.username,
+      email: user.email,
+      phone: user.phone,
+      role: user.role,
+      profilePicture: user.profilePicture,
+      cartItems: user.cartItems,
     });
   } catch (error) {
     res.status(500).json({
@@ -183,6 +204,8 @@ export const refresh = async (req, res) => {
     });
   }
 };
+
+// the frontend sends the users email anytime you opt for a password change, either forgot password or reset password. now the backend verifies to see if the email really exists by finding a match to the user in the database. a reset token is then generated with epiration, saved in the db and sent to the frontend via email. once you click the reset link, it hits back to the backend to check the expiration if the token is still valid, then redirects you to the frontend where you can add your new password, the rest is handled by the backend
 
 export const forgotPassword = async (req, res) => {
   try {
