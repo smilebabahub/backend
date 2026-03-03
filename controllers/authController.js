@@ -31,7 +31,7 @@ export const register = async (req, res) => {
       });
     }
 
-    // 🔐 HASH PASSWORD HERE
+    // HASH PASSWORD HERE
     const hashedPassword = await bcrypt.hash(password, 12);
 
     const user = await User.create({

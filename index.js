@@ -10,7 +10,6 @@ import cookieParser from "cookie-parser";
 
 import connectDB from "./config/db.js";
 import authRoute from "./routes/authRoute.js";
-// import adRoute from "./routes/adRoute.js";
 import productRoute from "./routes/productRoute.js";
 import paymentRoute from "./routes/paymentRoute.js";
 
@@ -34,7 +33,6 @@ app.use(cookieParser());
 app.set("trust proxy", true);
 // ROUTES
 app.use("/smilebaba/auth", authRoute);
-// app.use("/smilebaba/ads", adRoute);
 app.use("/smilebaba/products", productRoute);
 app.use("/smilebaba/payment", paymentRoute);
 

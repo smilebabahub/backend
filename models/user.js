@@ -33,7 +33,7 @@ const userSchema = new mongoose.Schema(
       required: true,
       unique: true,
       trim: true,
-      minlength: 3,
+      minlength: 8,
     },
 
     email: {
@@ -61,6 +61,7 @@ const userSchema = new mongoose.Schema(
     phone: {
       type: String,
       trim: true,
+      required: true
     },
 
     country: {
