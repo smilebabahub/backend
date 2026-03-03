@@ -1,34 +1,34 @@
 import express from "express";
-import upload from "../middleware/uploadMiddleware.js";
-import protect from "../middleware/protect.js";
+import upload from "../middleWare/uploadMiddleware.js";
+import protect from "../middleWare/protect.js";
+import { adminOnly, vendorOnly } from "../middleWare/roleGuard.js";
 import subscribedOnly from "../middleware/subscriptionGuard.js";
-import { vendorOnly } from "../middleware/roleGuard.js";
 
 import {
   createProduct,
-  getProducts,
-  getProduct,
+  getAllProducts,
+  getSingleProduct,
   updateProduct,
   deleteProduct,
 } from "../controllers/productController.js";
 
 const router = express.Router();
 
-// so same as the add products, all users regardless can access all products, no authentication required to get this bro
-router.get("/", getProducts);
-router.get("/:id", getProduct);
+// Everyone can view
+router.get("/", getAllProducts);
+router.get("/:id", getSingleProduct);
 
-// strict authorization here
-router.post(
-  "/create",
-  protect,
-  vendorOnly,
-  subscribedOnly,
-  upload.array("images", 5),
-  createProduct,
-);
+//CREATE (Any Logged-in User)
 
-//router.get("/vendor/my-products", protect, vendorOnly, getVendorProducts);
+router.post("/create", protect, upload.array("images", 5), createProduct);
+
+//UPDATE (Owner Vendor or Admin)
+router.put("/:id", protect, upload.array("images", 5), updateProduct);
+
+//DELETE (Owner Vendor or Admin)
+router.delete("/:id", protect, deleteProduct);
+
+router.get("/vendor/my-products", protect, vendorOnly, getAllProducts);
 
 router.patch(
   "/:id",

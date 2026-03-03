@@ -23,11 +23,11 @@ export const createProduct = async (req, res) => {
       price,
       stock,
       images,
-      vendor: req.user.userId,
+      vendor: req.user.userId, // whoever created it
     });
 
     res.status(201).json({
-      message: "Product added successfully",
+      message: "Product created successfully",
       product,
     });
   } catch (error) {
@@ -37,22 +37,25 @@ export const createProduct = async (req, res) => {
 
 
 
-
-// fetching all products
-export const getProducts = async (req, res) => {
+export const getAllProducts = async (req, res) => {
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 12;
-
+    const page = Number(req.query.page) || 1;
+    const limit = Number(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
-    const products = await Product.find({ isActive: true })
-      .sort({ _id: -1 })
-      .skip(skip)
-      .limit(limit)
-      .populate("vendor", "name phone");
+    const keyword = req.query.search
+      ? {
+          name: { $regex: req.query.search, $options: "i" },
+        }
+      : {};
 
-    const total = await Product.countDocuments({ isActive: true });
+    const products = await Product.find({ ...keyword })
+      .populate("vendor", "username email role") // safe fields only
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
+
+    const total = await Product.countDocuments({ ...keyword });
 
     res.status(200).json({
       total,
@@ -67,18 +70,14 @@ export const getProducts = async (req, res) => {
 
 
 
-
-
-//method: Get Protected
-//fetching a single product
-export const getProduct = async (req, res) => {
+export const getSingleProduct = async (req, res) => {
   try {
     const product = await Product.findById(req.params.id).populate(
       "vendor",
-      "name phone",
+      "username email role",
     );
 
-    if (!product || !product.isActive) {
+    if (!product) {
       return res.status(404).json({
         message: "Product not found",
       });
@@ -92,49 +91,44 @@ export const getProduct = async (req, res) => {
 
 
 
-
-
-
-// updating endpoint here
 export const updateProduct = async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
 
-    if (!product || !product.isActive) {
+    if (!product) {
       return res.status(404).json({
         message: "Product not found",
       });
     }
 
-    // checking the vendors' authorization
-    if (product.vendor.toString() !== req.user.userId) {
+    const isOwner = product.vendor.toString() === req.user.userId;
+    const isAdmin = req.user.role === "admin";
+    const isSubscribedVendor =
+      req.user.role === "vendor" && req.user.isSubscribed;
+
+    if (!(isAdmin || (isOwner && isSubscribedVendor))) {
       return res.status(403).json({
         message: "Not authorized to update this product",
       });
     }
 
-    const { name, description, price, stock, isActive } = req.body;
+    const { name, description, price, stock } = req.body;
 
-    // Replace images if new ones uploaded
-    let images = product.images;
+    if (name) product.name = name;
+    if (description) product.description = description;
+    if (price) product.price = price;
+    if (stock) product.stock = stock;
 
-    if (req.files?.length > 0) {
-      images = req.files.map((file, index) => ({
+    if (req.files && req.files.length > 0) {
+      product.images = req.files.map((file, index) => ({
         url: `/uploads/${file.filename}`,
         isCover: index === 0,
       }));
     }
 
-    product.name = name ?? product.name;
-    product.description = description ?? product.description;
-    product.price = price ?? product.price;
-    product.stock = stock ?? product.stock;
-    product.images = images;
-    product.isActive = isActive ?? product.isActive;
-
     await product.save();
 
-    res.status(200).json({
+    res.json({
       message: "Product updated successfully",
       product,
     });
@@ -143,32 +137,30 @@ export const updateProduct = async (req, res) => {
   }
 };
 
-
-
-
-
-// delete endpoint
 export const deleteProduct = async (req, res) => {
   try {
     const product = await Product.findById(req.params.id);
 
-    if (!product || !product.isActive) {
+    if (!product) {
       return res.status(404).json({
         message: "Product not found",
       });
     }
 
-    if (product.vendor.toString() !== req.user.userId) {
+    const isOwner = product.vendor.toString() === req.user.userId;
+    const isAdmin = req.user.role === "admin";
+    const isSubscribedVendor =
+      req.user.role === "vendor" && req.user.isSubscribed;
+
+    if (!(isAdmin || (isOwner && isSubscribedVendor))) {
       return res.status(403).json({
-        message: "Not authorized",
+        message: "Not authorized to delete this product",
       });
     }
 
-    product.isActive = false;
+    await product.deleteOne();
 
-    await product.save();
-
-    res.status(200).json({
+    res.json({
       message: "Product deleted successfully",
     });
   } catch (error) {
