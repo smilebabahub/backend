@@ -33,7 +33,7 @@ const userSchema = new mongoose.Schema(
       required: true,
       unique: true,
       trim: true,
-      minlength: 8,
+      minlength: 3,
     },
 
     email: {
