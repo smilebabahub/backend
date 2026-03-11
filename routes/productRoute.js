@@ -26,4 +26,17 @@ router.put("/:id", protect, upload.array("images", 5), updateProduct);
 //DELETE (Owner Vendor or Admin)
 router.delete("/:id", protect, deleteProduct);
 
+router.get("/vendor/my-products", protect, vendorOnly, getAllProducts);
+
+router.patch(
+  "/:id",
+  protect,
+  vendorOnly,
+  subscribedOnly,
+  upload.array("images", 5),
+  updateProduct,
+);
+
+router.delete("/:id", protect, vendorOnly, subscribedOnly, deleteProduct);
+
 export default router;

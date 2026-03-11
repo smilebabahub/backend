@@ -1,15 +1,23 @@
-import User from "../models/user.js";
-import {
-  generateAccessToken,
-  generateRefreshToken,
-} from "../utils/generateTokens.js";
-import jwt from "jsonwebtoken";
+import Ad from "../models/adModel.js";
 
-// REGISTER
-
-export const register = async (req, res) => {
+export const createAd = async (req, res) => {
   try {
-    const { username, email, password, phone } = req.body;
+    const {
+      title,
+      categoryMain,
+      categorySub,
+      categoryType,
+      region,
+      city,
+      description,
+      negotiable,
+      price,
+      contactName,
+      contactPhone,
+      deliveryOption,
+      plan,
+      packageType,
+    } = req.body;
 
     if (!username || !email || !password || !phone) {
       return res.status(400).json({
@@ -17,139 +25,214 @@ export const register = async (req, res) => {
       });
     }
 
-    // Check if email or username already exists
-    const existingUser = await User.findOne({
-      $or: [{ email }, { username }],
-    });
+    const images = req.files?.map((file, index) => ({
+      url: `/uploads/${file.filename}`,
+      isCover: index === 0,
+    }));
 
-    if (existingUser) {
-      return res.status(400).json({
-        message: "Email or username already in use",
-      });
-    }
+    const expiresAt =
+      plan === "daily"
+        ? new Date(Date.now() + 24 * 60 * 60 * 1000)
+        : plan === "weekly"
+          ? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+          : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    const user = await User.create({
-      username,
-      email,
-      password,
-      phone,
-      country,
-      ipAddress: req.ip,
-      role: "guest",
+    const ad = await Ad.create({
+      title,
+      category: {
+        main: categoryMain,
+        sub: categorySub,
+        type: categoryType,
+      },
+      images,
+      location: { region, city },
+      description,
+      negotiable,
+      price,
+      contact: {
+        name: contactName,
+        phone: contactPhone,
+      },
+      deliveryOption,
+      subscription: {
+        plan,
+        package: packageType,
+        expiresAt,
+      },
+      postedBy: req.user.userId,
     });
 
     res.status(201).json({
-      message: "Registration successful",
+      message: "Ad posted successfully",
+      ad,
     });
   } catch (error) {
-    res.status(500).json({
-      message: "Server error",
-    });
+    res.status(500).json({ message: "Server error" });
   }
 };
 
-// LOGIN
-
-export const login = async (req, res) => {
+// fetching a single add endpoint here
+export const getSingleAd = async (req, res) => {
   try {
-    const { email, password } = req.body;
-
-    if (!email || !password) {
-      return res.status(400).json({
-        message: "Email and password required",
-      });
-    }
-
-    const user = await User.findOne({ email });
-
-    if (!user) {
-      return res.status(400).json({
-        message: "Invalid credentials",
-      });
-    }
-
-    const isMatch = await user.comparePassword(password);
-
-    if (!isMatch) {
-      return res.status(400).json({
-        message: "Invalid credentials",
-      });
-    }
-
-    const accessToken = generateAccessToken(user);
-    const refreshToken = generateRefreshToken(user);
-
-    res.cookie("accessToken", accessToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      maxAge: 24 * 60 * 60 * 1000,
-    });
-
-    res.cookie("refreshToken", refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
-
-    res.json({
-      message: "Login successful",
-      user: {
-        id: user._id,
-        username: user.username,
-        role: user.role,
-        isSubscribed: user.isSubscribed,
-      },
-    });
-  } catch (error) {
-    res.status(500).json({
-      message: "Server error",
-    });
-  }
-};
-
-// LOGOUT
-export const logout = (req, res) => {
-  res.clearCookie("accessToken");
-  res.clearCookie("refreshToken");
-
-  res.json({
-    message: "Logged out successfully",
-  });
-};
-
-// REFRESH TOKEN
-
-export const refresh = (req, res) => {
-  const token = req.cookies.refreshToken;
-
-  if (!token) {
-    return res.status(401).json({
-      message: "No refresh token",
-    });
-  }
-
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
-
-    const accessToken = jwt.sign(
-      { userId: decoded.userId },
-      process.env.JWT_ACCESS_SECRET,
-      { expiresIn: "1d" },
+    const ad = await Ad.findById(req.params.id).populate(
+      "postedBy",
+      "name phone",
     );
 
-    res.cookie("accessToken", accessToken, {
-      httpOnly: true,
-      sameSite: "strict",
+    if (!ad) {
+      return res.status(404).json({ message: "Ad not found" });
+    }
+
+    res.status(200).json(ad);
+  } catch (error) {
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+//fetching all adds endpoint here
+export const getAds = async (req, res) => {
+  try {
+    const page = Number(req.query.page) || 1;
+    const limit = 10;
+    const skip = (page - 1) * limit;
+
+    const ads = await Ad.find({})
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .populate("postedBy", "name phone");
+
+    res.status(200).json(ads);
+  } catch (error) {
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+// update endpoint here.
+export const updateAd = async (req, res) => {
+  try {
+    const ad = await Ad.findById(req.params.id);
+
+    if (!ad) {
+      return res.status(404).json({ message: "Ad not found" });
+    }
+
+    // checking the authorized user here
+    if (ad.postedBy.toString() !== req.user.userId) {
+      return res.status(403).json({
+        message: "You are not authorized to update this ad",
+      });
+    }
+
+    const {
+      title,
+      categoryMain,
+      categorySub,
+      categoryType,
+      region,
+      city,
+      description,
+      negotiable,
+      price,
+      contactName,
+      contactPhone,
+      deliveryOption,
+      plan,
+      packageType,
+    } = req.body;
+
+    // the image file updating here
+    let images = ad.images;
+
+    if (req.files && req.files.length > 0) {
+      images = req.files.map((file, index) => ({
+        url: `/uploads/${file.filename}`,
+        isCover: index === 0,
+      }));
+    }
+
+    //  handling the expiration recalculation here
+    let expiresAt = ad.subscription?.expiresAt;
+
+    if (plan) {
+      expiresAt =
+        plan === "daily"
+          ? new Date(Date.now() + 24 * 60 * 60 * 1000)
+          : plan === "weekly"
+            ? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+            : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    }
+
+    const updatedFields = {
+      title: title ?? ad.title,
+
+      category: {
+        main: categoryMain ?? ad.category.main,
+        sub: categorySub ?? ad.category.sub,
+        type: categoryType ?? ad.category.type,
+      },
+
+      location: {
+        region: region ?? ad.location.region,
+        city: city ?? ad.location.city,
+      },
+
+      description: description ?? ad.description,
+      negotiable: negotiable ?? ad.negotiable,
+      price: price ?? ad.price,
+
+      contact: {
+        name: contactName ?? ad.contact.name,
+        phone: contactPhone ?? ad.contact.phone,
+      },
+
+      deliveryOption: deliveryOption ?? ad.deliveryOption,
+
+      images,
+
+      subscription: {
+        plan: plan ?? ad.subscription?.plan,
+        package: packageType ?? ad.subscription?.package,
+        expiresAt,
+      },
+    };
+
+    const updatedAd = await Ad.findByIdAndUpdate(req.params.id, updatedFields, {
+      new: true,
+      runValidators: true,
     });
 
-    res.json({
-      message: "Token refreshed",
+    res.status(200).json({
+      message: "Ad updated successfully",
+      ad: updatedAd,
     });
   } catch (error) {
-    res.status(403).json({
-      message: "Invalid refresh token",
+    console.error(error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+// deleting endpoint here
+export const deleteAd = async (req, res) => {
+  try {
+    const ad = await Ad.findById(req.params.id);
+
+    if (!ad) {
+      return res.status(404).json({ message: "Ad not found" });
+    }
+
+    if (ad.postedBy?.toString() !== req.user.userId) {
+      return res.status(403).json({
+        message: "You are not authorized to delete this ad",
+      });
+    }
+
+    await ad.deleteOne();
+
+    res.status(200).json({
+      message: "Ad deleted successfully",
     });
+  } catch (error) {
+    res.status(500).json({ message: "Server error" });
   }
 };

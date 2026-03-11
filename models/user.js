@@ -7,7 +7,6 @@ const subscriptionSchema = new mongoose.Schema({
     type: String,
     enum: ["basic", "standard", "premium"],
   },
-
   billingCycle: {
     type: String,
     enum: ["monthly", "yearly"],
@@ -39,8 +38,8 @@ const userSchema = new mongoose.Schema(
 
     email: {
       type: String,
-      required: true,
       unique: true,
+      sparse: true,
       lowercase: true,
       validate: {
         validator: validator.isEmail,
@@ -64,6 +63,7 @@ const userSchema = new mongoose.Schema(
     phone: {
       type: String,
       trim: true,
+      required: true
     },
 
     loginHistory: [

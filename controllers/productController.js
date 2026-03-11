@@ -1,12 +1,13 @@
 import Product from "../models/Product.js";
 
+//Create add products here: only suscribed venodrs are eligible
 export const createProduct = async (req, res) => {
   try {
     const { name, description, price, stock } = req.body;
 
     if (!name || !price) {
       return res.status(400).json({
-        message: "Name and price required",
+        message: "Name and price are required",
       });
     }
 
@@ -33,6 +34,8 @@ export const createProduct = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
+
+
 
 export const getAllProducts = async (req, res) => {
   try {
@@ -65,6 +68,8 @@ export const getAllProducts = async (req, res) => {
   }
 };
 
+
+
 export const getSingleProduct = async (req, res) => {
   try {
     const product = await Product.findById(req.params.id).populate(
@@ -83,6 +88,8 @@ export const getSingleProduct = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
+
+
 
 export const updateProduct = async (req, res) => {
   try {

@@ -42,7 +42,6 @@ app.set("trust proxy", true);
 // ROUTES
 
 app.use("/smilebaba/auth", authRoute);
-// app.use("/smilebaba/ads", adRoute);
 app.use("/smilebaba/products", productRoute);
 app.use("/smilebaba/payment", paymentRoute);
 app.use("/smilebaba/chat", chatRoute);
