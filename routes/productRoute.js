@@ -1,7 +1,6 @@
 import express from "express";
 import upload from "../middleWare/uploadMiddleware.js";
 import protect from "../middleWare/protect.js";
-import { adminOnly } from "../middleWare/roleGuard.js";
 
 import {
   createProduct,

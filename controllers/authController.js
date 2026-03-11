@@ -9,7 +9,6 @@ import {
 } from "../utils/generateTokens.js";
 
 import axios from "axios";
-import user from "../models/user.js";
 
 //this function makes an API call to the geoapify API to get the IP address and the geolocation
 const getLocationFromIP = async (ip) => {
@@ -70,17 +69,15 @@ export const register = async (req, res) => {
       ],
     });
 
-    res
-      .status(201)
-      .json({
-        message: "User registered successfully",
-        username: user.username,
-        email: user.email,
-        phone: user.phone,
-        role: user.role,
-        profilePicture: user.profilePicture,
-        cartItems: user.cartItems,
-      });
+    res.status(201).json({
+      message: "User registered successfully",
+      username: user.username,
+      email: user.email,
+      phone: user.phone,
+      role: user.role,
+      profilePicture: user.profilePicture,
+      cartItems: user.cartItems,
+    });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
