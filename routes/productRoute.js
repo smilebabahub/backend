@@ -9,6 +9,8 @@ import {
   updateProduct,
   deleteProduct,
 } from "../controllers/productController.js";
+import subscribedOnly from "../middleWare/subscriptionGuard.js";
+import { vendorOnly } from "../middleWare/roleGuard.js";
 
 const router = express.Router();
 
