@@ -111,20 +111,25 @@ export const login = async (req, res) => {
 
     const geoData = await getLocationFromIP(ip);
 
-    user.loginHistory.push({
-      ip,
-      country: geoData.country,
-      city: geoData.city,
-      location: geoData.location,
-      userAgent: req.headers["user-agent"],
-    });
-
-    await user.save();
+    await User.updateOne(
+      { _id: user._id },
+      {
+        $push: {
+          loginHistory: {
+            ip,
+            country: geoData?.country || "Unknown",
+            city: geoData?.city || "Unknown",
+            location: geoData?.location || "Unknown",
+            userAgent: req.headers["user-agent"],
+          },
+        },
+      },
+    );
 
     const accessToken = generateAccessToken(user);
     const refreshToken = generateRefreshToken(user);
 
-    // here, we're using the http cookies to keep track of our tokens and its payloads which we'll be needing later for our middleware validations
+
     res.cookie("accessToken", accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
