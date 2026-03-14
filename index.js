@@ -26,8 +26,10 @@ const server = http.createServer(app);
 app.use(express.json());
 app.use(
   cors({
-    origin: "*",
+    origin: ["http://localhost:3000", "https://smilebabahub.com"],
     credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   }),
 );
 
