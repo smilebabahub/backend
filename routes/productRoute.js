@@ -1,5 +1,5 @@
 import express from "express";
-import upload from "../middleWare/uploadMiddleware.js";
+import { upload, processImages } from "../middleWare/uploadMiddleware.js";
 import protect from "../middleWare/protect.js";
 
 import {
@@ -20,7 +20,13 @@ router.get("/:id", getSingleProduct);
 
 //CREATE (Any Logged-in User)
 
-router.post("/create", protect, upload.array("images", 5), createProduct);
+router.post(
+  "/create",
+  protect,
+  upload.array("images", 5),
+  processImages,
+  createProduct,
+);
 
 //UPDATE (Owner Vendor or Admin)
 router.put("/:id", protect, upload.array("images", 5), updateProduct);

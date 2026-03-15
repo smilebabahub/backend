@@ -3,27 +3,62 @@ import Product from "../models/Product.js";
 //Create add products here: only suscribed venodrs are eligible
 export const createProduct = async (req, res) => {
   try {
-    const { name, description, price, stock } = req.body;
+    const {
+      title,
+      category,
+      subcategory,
+      type,
+      name,
+      description,
+      price,
+      stock,
+      region,
+      city,
+      phone,
+    } = req.body;
 
-    if (!name || !price) {
+    if (
+      !title ||
+      !category ||
+      !subcategory ||
+      !type ||
+      !description ||
+      !region ||
+      !city ||
+      !price ||
+      !name ||
+      !phone
+    ) {
       return res.status(400).json({
-        message: "Name and price are required",
+        message: "All required fields must be filled",
       });
     }
 
-    const images =
-      req.files?.map((file, index) => ({
-        url: `/uploads/${file.filename}`,
-        isCover: index === 0,
-      })) || [];
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({
+        message: "Please upload at least one image",
+      });
+    }
+
+    const images = req.files.map((file, index) => ({
+      url: `/uploads/${file.filename}`,
+      isCover: index === 0,
+    }));
 
     const product = await Product.create({
+      title,
+      category,
+      subcategory,
+      type,
+      region,
+      city,
+      phone,
       name,
       description,
       price,
       stock,
       images,
-      vendor: req.user.userId, // whoever created it
+      vendor: req.user.userId,
     });
 
     res.status(201).json({
@@ -31,7 +66,10 @@ export const createProduct = async (req, res) => {
       product,
     });
   } catch (error) {
-    res.status(500).json({ message: "Server error" });
+    console.error(error);
+    res.status(500).json({
+      message: "Server error",
+    });
   }
 };
 

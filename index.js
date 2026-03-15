@@ -18,13 +18,20 @@ import chatRoute from "./routes/chatRoute.js";
 import Message from "./models/Message.js";
 import rateLimit from "express-rate-limit";
 
+import fs from "fs";
+
 
 //CONFIGURATIONS
 const app = express();
 
+if (!fs.existsSync("uploads")) {
+  fs.mkdirSync("uploads");
+}
+
 const server = http.createServer(app);
 
-app.use(express.json());
+app.use(express.json({ limit: "30mb" }));
+app.use(express.urlencoded({ extended: true, limit: "30mb" }));
 app.use(
   cors({
     origin: ["http://localhost:3000", "https://smilebabahub.com"],
@@ -39,6 +46,8 @@ app.use(helmet.crossOriginResourcePolicy({ policy: "cross-origin" }));
 app.use(morgan("common"));
 app.use(cookieParser());
 
+app.use("/uploads", express.static("uploads"));
+
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -47,7 +56,11 @@ const limiter = rateLimit({
 
 app.use(limiter);
 
-app.set("trust proxy", true);
+
+
+app.set("trust proxy", 1);
+
+app.use(limiter);
 // ROUTES
 
 app.use("/smilebaba/auth", authRoute);
