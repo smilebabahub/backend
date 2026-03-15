@@ -4,7 +4,6 @@ dotenv.config();
 import express from "express";
 import helmet from "helmet";
 import morgan from "morgan";
-import bodyParser from "body-parser";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import http from "http";
@@ -17,6 +16,8 @@ import productRoute from "./routes/productRoute.js";
 import paymentRoute from "./routes/paymentRoute.js";
 import chatRoute from "./routes/chatRoute.js";
 import Message from "./models/Message.js";
+import rateLimit from "express-rate-limit";
+
 
 //CONFIGURATIONS
 const app = express();
@@ -36,9 +37,15 @@ app.use(
 app.use(helmet());
 app.use(helmet.crossOriginResourcePolicy({ policy: "cross-origin" }));
 app.use(morgan("common"));
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: false }));
 app.use(cookieParser());
+
+
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 500,
+});
+
+app.use(limiter);
 
 app.set("trust proxy", true);
 // ROUTES
@@ -48,13 +55,21 @@ app.use("/smilebaba/products", productRoute);
 app.use("/smilebaba/payment", paymentRoute);
 app.use("/smilebaba/chat", chatRoute);
 
+app.get("/", (req, res) => {
+  res.send("SmileBabaHub API Running");
+});
+
 const PORT = process.env.PORT || 3001;
 
 //creating socket server
 
 const io = new Server(server, {
   cors: {
-    origin: "http://localhost:5173",
+    origin: [
+      "http://localhost:5173",
+      "http://localhost:3000",
+      "https://smilebabahub.com",
+    ],
     methods: ["GET", "POST"],
     credentials: true,
   },
@@ -74,15 +89,18 @@ io.on("connection", (socket) => {
     try {
       const { room, sender, receiver, text } = data;
 
-      // Save to DB
+      if (!room || !sender || !receiver || !text) {
+        return;
+      }
+
       const newMessage = await Message.create({
         room,
         sender,
         receiver,
         text,
+        createdAt: new Date(),
       });
 
-      // Send to both users in room
       io.to(room).emit("receive_message", newMessage);
     } catch (error) {
       console.error("Message error:", error);
@@ -91,6 +109,23 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     console.log("User disconnected");
+  });
+});
+
+
+const onlineUsers = new Map();
+
+io.on("connection", (socket) => {
+  socket.on("register_user", (userId) => {
+    onlineUsers.set(userId, socket.id);
+  });
+
+  socket.on("disconnect", () => {
+    onlineUsers.forEach((value, key) => {
+      if (value === socket.id) {
+        onlineUsers.delete(key);
+      }
+    });
   });
 });
 
@@ -108,3 +143,16 @@ const start = async () => {
 };
 
 start();
+
+
+const shutdown = async () => {
+  console.log("Shutting down server...");
+
+  await mongoose.connection.close();
+
+  console.log(" MongoDB connection closed");
+  process.exit(0);
+};
+
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
