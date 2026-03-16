@@ -17,6 +17,16 @@ export const createProduct = async (req, res) => {
       phone,
     } = req.body;
 
+    const existing = await Product.findOne({
+      title: req.body.title,
+      user: req.user.userId,
+      createdAt: { $gte: new Date(Date.now() - 10000) },
+    });
+
+    if (existing) {
+      return res.status(409).json({ message: "Duplicate product detected" });
+    }
+
     if (
       !title ||
       !category ||
