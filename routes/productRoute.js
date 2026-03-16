@@ -1,6 +1,6 @@
 import express from "express";
 import { upload, processImages } from "../middleware/uploadMiddleware.js";
-import protect from "../middleWare/protect.js";
+import protect from "../middleware/protect.js";
 
 import {
   createProduct,
