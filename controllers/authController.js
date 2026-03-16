@@ -129,18 +129,17 @@ export const login = async (req, res) => {
     const accessToken = generateAccessToken(user);
     const refreshToken = generateRefreshToken(user);
 
-
     res.cookie("accessToken", accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: process.env.NODE_ENV === "production" ? "strict" : "lax",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
       maxAge: 24 * 60 * 60 * 1000,
     });
-
+    
     res.cookie("refreshToken", refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: process.env.NODE_ENV === "production" ? "strict" : "lax",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
@@ -191,12 +190,10 @@ export const logout = async (req, res) => {
 //smilebaba/auth/refresh
 // REFRESH TOKEN, to renew the access tokens when they expires
 export const refresh = async (req, res) => {
-  const token = req.cookies.refreshToken;
+  const token = req.cookies?.refreshToken;
 
   if (!token) {
-    return res.status(401).json({
-      message: "No refresh token",
-    });
+    return res.status(401).json({ message: "No refresh token" });
   }
 
   try {
@@ -205,9 +202,7 @@ export const refresh = async (req, res) => {
     const user = await User.findById(decoded.userId);
 
     if (!user) {
-      return res.status(401).json({
-        message: "User no longer exists",
-      });
+      return res.status(401).json({ message: "User no longer exists" });
     }
 
     const accessToken = generateAccessToken(user);
@@ -215,17 +210,13 @@ export const refresh = async (req, res) => {
     res.cookie("accessToken", accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-      secure: process.env.NODE_ENV === "production",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+      maxAge: 24 * 60 * 60 * 1000,
     });
 
-    res.json({
-      message: "Token refreshed",
-    });
+    return res.status(200).json({ message: "Token refreshed" });
   } catch (error) {
-    res.status(403).json({
-      message: "Invalid refresh token",
-    });
+    return res.status(403).json({ message: "Invalid refresh token" });
   }
 };
 
