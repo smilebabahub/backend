@@ -69,14 +69,18 @@ export const register = async (req, res) => {
       ],
     });
 
-    res.status(201).json({
-      message: "User registered successfully",
-      username: user.username,
-      email: user.email,
-      phone: user.phone,
-      role: user.role,
-      profilePicture: user.profilePicture,
-      cartItems: user.cartItems,
+    res.status(200).json({
+      message: "Login successful",
+      user: {
+        username: user.username,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        city: user.city,
+        state: user.state,
+        profilePicture: user.profilePicture,
+        cartItems: user.cartItems,
+      },
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -145,18 +149,29 @@ export const login = async (req, res) => {
 
     res.status(200).json({
       message: "Login successful",
-      accessToken: accessToken,
-      username: user.username,
-      email: user.email,
-      phone: user.phone,
-      role: user.role,
-      profilePicture: user.profilePicture,
-      cartItems: user.cartItems,
+      accessToken,
+      user: {
+        username: user.username,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        city: user.city,
+        state: user.state,
+        profilePicture: user.profilePicture,
+        cartItems: user.cartItems,
+      },
     });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Server error" });
   }
+};
+
+
+export const getCurrentUser = async (req, res) => {
+  const user = await User.findById(req.user.userId).select("-password");
+
+  res.json(user);
 };
 
 
