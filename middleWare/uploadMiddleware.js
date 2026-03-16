@@ -1,16 +1,9 @@
 
 import multer from "multer";
 import sharp from "sharp";
-import fs from "fs";
-import path from "path";
 import cloudinary from "../config/cloudinary.js";
 
 
-const uploadPath = "uploads/";
-
-if (!fs.existsSync(uploadPath)) {
-  fs.mkdirSync(uploadPath, { recursive: true });
-}
 
 const storage = multer.memoryStorage();
 
@@ -35,28 +28,28 @@ export const processImages = async (req, res, next) => {
   if (!req.files || req.files.length === 0) return next();
 
   try {
-    const uploadedImages = [];
+    const uploadedImages = await Promise.all(
+      req.files.map(async (file) => {
+        const buffer = await sharp(file.buffer)
+          .resize({ width: 1200, withoutEnlargement: true })
+          .jpeg({ quality: 80 })
+          .toBuffer();
 
-    for (const file of req.files) {
-      const buffer = await sharp(file.buffer)
-        .resize({ width: 1200, withoutEnlargement: true })
-        .jpeg({ quality: 80 })
-        .toBuffer();
+        const result = await new Promise((resolve, reject) => {
+          const stream = cloudinary.uploader.upload_stream(
+            { folder: "smilebaba-products" },
+            (error, result) => {
+              if (error) reject(error);
+              else resolve(result);
+            },
+          );
 
-      const result = await new Promise((resolve, reject) => {
-        const stream = cloudinary.uploader.upload_stream(
-          { folder: "smilebaba-products" },
-          (error, result) => {
-            if (error) reject(error);
-            else resolve(result);
-          },
-        );
+          stream.end(buffer);
+        });
 
-        stream.end(buffer);
-      });
-
-      uploadedImages.push(result.secure_url);
-    }
+        return result.secure_url;
+      }),
+    );
 
     req.processedImages = uploadedImages;
 
