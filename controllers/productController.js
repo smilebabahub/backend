@@ -44,14 +44,14 @@ export const createProduct = async (req, res) => {
       });
     }
 
-    if (!req.files || req.files.length === 0) {
+    if (!req.processedImages || req.processedImages.length === 0) {
       return res.status(400).json({
         message: "Please upload at least one image",
       });
     }
 
-    const images = req.files.map((file, index) => ({
-      url: `/uploads/${file.filename}`,
+    const images = req.processedImages.map((url, index) => ({
+      url,
       isCover: index === 0,
     }));
 

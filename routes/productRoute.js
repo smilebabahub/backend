@@ -1,5 +1,5 @@
 import express from "express";
-import { upload, processImages } from "../middleWare/uploadMiddleware.js";
+import { upload, processImages } from "../middleware/uploadMiddleware.js";
 import protect from "../middleWare/protect.js";
 
 import {
@@ -11,6 +11,7 @@ import {
 } from "../controllers/productController.js";
 import subscribedOnly from "../middleWare/subscriptionGuard.js";
 import { vendorOnly } from "../middleWare/roleGuard.js";
+import Product from "../models/Product.js";
 
 const router = express.Router();
 
@@ -27,6 +28,23 @@ router.post(
   processImages,
   createProduct,
 );
+
+// router.post(
+//   "/products/create",
+//   authMiddleware,
+//   upload.array("images", 5),
+//   processImages,
+//   async (req, res) => {
+//     const product = await Product.create({
+//       ...req.body,
+//       images: req.processedImages,
+//       user: req.user.id,
+//     });
+
+//     res.status(201).json(product);
+//   },
+// );
+
 
 //UPDATE (Owner Vendor or Admin)
 router.put("/:id", protect, upload.array("images", 5), updateProduct);
