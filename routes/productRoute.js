@@ -1,5 +1,5 @@
 import express from "express";
-import { upload, processImages } from "../middleware/uploadMiddleware.js";
+import { upload, processImages } from "../middleware/upload.middleware.js";
 import protect from "../middleware/protect.js";
 
 import {
