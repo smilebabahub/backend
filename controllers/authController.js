@@ -242,7 +242,7 @@ export const refresh = async (req, res) => {
     console.log("Cookies:", req.cookies);
     console.log("Headers:", req.headers);
 
-    return res.status(200).json({ message: "Token refreshed" });
+    return res.status(200).json({ accessToken, message: "Token refreshed" });
   } catch (error) {
     return res.status(403).json({ message: "Invalid refresh token" });
   }
