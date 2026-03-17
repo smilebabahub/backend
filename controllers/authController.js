@@ -136,7 +136,7 @@ export const login = async (req, res) => {
     const cookieOptions = {
       httpOnly: true,
       secure: true,
-      sameSite: "none",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
       path: "/",
     };
 
@@ -152,7 +152,6 @@ export const login = async (req, res) => {
 
     res.status(200).json({
       message: "Login successful",
-      accessToken,
       user: {
         username: user.username,
         email: user.email,
@@ -186,8 +185,15 @@ export const getCurrentUser = async (req, res) => {
 // Our logout logic lies here.
 export const logout = async (req, res) => {
   try {
-      res.clearCookie("accessToken");
-      res.clearCookie("refreshToken");
+    const cookieOptions = {
+      httpOnly: true,
+      secure: true,
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+      path: "/",
+    };
+
+    res.clearCookie("accessToken", cookieOptions);
+    res.clearCookie("refreshToken", cookieOptions);
     
       res.json({
         message: "Logged out successfully",
@@ -208,7 +214,7 @@ export const logout = async (req, res) => {
 //smilebaba/auth/refresh
 // REFRESH TOKEN, to renew the access tokens when they expires
 export const refresh = async (req, res) => {
-  const token = req.cookies.accessToken || req.headers.authorization?.split(" ")[1];
+  const token = req.cookies.refreshToken;
 
   if (!token) {
     return res.status(401).json({ message: "No refresh token" });
