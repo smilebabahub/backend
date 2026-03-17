@@ -133,17 +133,20 @@ export const login = async (req, res) => {
     const accessToken = generateAccessToken(user);
     const refreshToken = generateRefreshToken(user);
 
-    res.cookie("accessToken", accessToken, {
+    const cookieOptions = {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+      secure: true,
+      sameSite: "none",
+      path: "/",
+    };
+
+    res.cookie("accessToken", accessToken, {
+      ...cookieOptions,
       maxAge: 24 * 60 * 60 * 1000,
     });
-    
+
     res.cookie("refreshToken", refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+      ...cookieOptions,
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
@@ -205,7 +208,7 @@ export const logout = async (req, res) => {
 //smilebaba/auth/refresh
 // REFRESH TOKEN, to renew the access tokens when they expires
 export const refresh = async (req, res) => {
-  const token = req.cookies?.refreshToken;
+  const token = req.cookies.accessToken || req.headers.authorization?.split(" ")[1];
 
   if (!token) {
     return res.status(401).json({ message: "No refresh token" });
@@ -228,6 +231,9 @@ export const refresh = async (req, res) => {
       sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
       maxAge: 24 * 60 * 60 * 1000,
     });
+
+    console.log("Cookies:", req.cookies);
+    console.log("Headers:", req.headers);
 
     return res.status(200).json({ message: "Token refreshed" });
   } catch (error) {
