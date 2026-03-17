@@ -30,19 +30,30 @@ if (!fs.existsSync("uploads")) {
 
 const server = http.createServer(app);
 
+const allowedOrigins = ["http://localhost:3000", "https://smilebabahub.com"];
+
 app.use(express.json({ limit: "30mb" }));
 app.use(express.urlencoded({ extended: true, limit: "30mb" }));
 app.use(
   cors({
-    origin: ["http://localhost:3000", "https://smilebabahub.com"],
+    origin: function (origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
     credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    exposedHeaders: ["set-cookie"],
   }),
 );
 
 app.use(helmet());
-app.use(helmet.crossOriginResourcePolicy({ policy: "cross-origin" }));
+app.use(
+  helmet({
+    crossOriginResourcePolicy: false,
+  }),
+);
 app.use(morgan("common"));
 app.use(cookieParser());
 
@@ -55,12 +66,8 @@ const limiter = rateLimit({
 });
 
 app.use(limiter);
-
-
-
 app.set("trust proxy", 1);
 
-app.use(limiter);
 // ROUTES
 
 app.use("/smilebaba/auth", authRoute);
