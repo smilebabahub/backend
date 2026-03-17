@@ -136,8 +136,9 @@ export const login = async (req, res) => {
     const cookieOptions = {
       httpOnly: true,
       secure: true,
-      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+      sameSite: "none",
       path: "/",
+      domain: ".onrender.com",
     };
 
     res.cookie("accessToken", accessToken, {
@@ -152,6 +153,7 @@ export const login = async (req, res) => {
 
     res.status(200).json({
       message: "Login successful",
+      accessToken,
       user: {
         username: user.username,
         email: user.email,
@@ -188,8 +190,9 @@ export const logout = async (req, res) => {
     const cookieOptions = {
       httpOnly: true,
       secure: true,
-      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+      sameSite: "none",
       path: "/",
+      domain: ".onrender.com",
     };
 
     res.clearCookie("accessToken", cookieOptions);
