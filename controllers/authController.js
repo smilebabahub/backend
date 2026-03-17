@@ -138,7 +138,6 @@ export const login = async (req, res) => {
       secure: true,
       sameSite: "none",
       path: "/",
-      domain: ".onrender.com",
     };
 
     res.cookie("accessToken", accessToken, {
@@ -192,7 +191,6 @@ export const logout = async (req, res) => {
       secure: true,
       sameSite: "none",
       path: "/",
-      domain: ".onrender.com",
     };
 
     res.clearCookie("accessToken", cookieOptions);
@@ -236,9 +234,9 @@ export const refresh = async (req, res) => {
 
     res.cookie("accessToken", accessToken, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-      maxAge: 24 * 60 * 60 * 1000,
+      secure: true,
+      sameSite: "none",
+      path: "/",
     });
 
     console.log("Cookies:", req.cookies);
