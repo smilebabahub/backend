@@ -133,12 +133,14 @@ export const login = async (req, res) => {
     const accessToken = generateAccessToken(user);
     const refreshToken = generateRefreshToken(user);
 
+    // Add this at the top of authController.js
+    const isProd = process.env.NODE_ENV === "production";
+
     const cookieOptions = {
       httpOnly: true,
-      secure: true,
-      sameSite: "none",
+      secure: isProd, // ✅ false on localhost, true in prod
+      sameSite: isProd ? "none" : "lax", // ✅ lax on localhost, none in prod
       path: "/",
-      maxAge: 24 * 60 * 60 * 1000,
     };
 
     res.cookie("accessToken", accessToken, {
@@ -187,19 +189,22 @@ export const getCurrentUser = async (req, res) => {
 // Our logout logic lies here.
 export const logout = async (req, res) => {
   try {
+    // Add this at the top of authController.js
+    const isProd = process.env.NODE_ENV === "production";
+
     const cookieOptions = {
       httpOnly: true,
-      secure: true,
-      sameSite: "none",
+      secure: isProd, // ✅ false on localhost, true in prod
+      sameSite: isProd ? "none" : "lax", // ✅ lax on localhost, none in prod
       path: "/",
     };
 
     res.clearCookie("accessToken", cookieOptions);
     res.clearCookie("refreshToken", cookieOptions);
-    
-      res.json({
-        message: "Logged out successfully",
-      });
+
+    res.json({
+      message: "Logged out successfully",
+    });
   } catch (error) {
     res.status(500).json({
       message: "Server error",
@@ -233,12 +238,19 @@ export const refresh = async (req, res) => {
 
     const accessToken = generateAccessToken(user);
 
-    res.cookie("accessToken", accessToken, {
+    // Add this at the top of authController.js
+    const isProd = process.env.NODE_ENV === "production";
+
+    const cookieOptions = {
       httpOnly: true,
-      secure: true,
-      sameSite: "none",
-      maxAge: 24 * 60 * 60 * 1000,
+      secure: isProd, // ✅ false on localhost, true in prod
+      sameSite: isProd ? "none" : "lax", // ✅ lax on localhost, none in prod
       path: "/",
+    };
+
+    res.cookie("accessToken", accessToken, {
+      ...cookieOptions,
+      maxAge: 24 * 60 * 60 * 1000,
     });
 
     console.log("Cookies:", req.cookies);
@@ -250,7 +262,8 @@ export const refresh = async (req, res) => {
   }
 };
 
-// the frontend sends the users email anytime you opt for a password change, either forgot password or reset password. now the backend verifies to see if the email really exists by finding a match to the user in the database. a reset token is then generated with epiration, saved in the db and sent to the frontend via email. once you click the reset link, it hits back to the backend to check the expiration if the token is still valid, then redirects you to the frontend where you can add your new password, the rest is handled by the backend
+
+
 
 export const forgotPassword = async (req, res) => {
   try {
