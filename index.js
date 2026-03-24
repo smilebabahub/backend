@@ -17,6 +17,7 @@ import paymentRoute from "./routes/paymentRoute.js";
 import chatRoute from "./routes/chatRoute.js";
 import Message from "./models/Message.js";
 import rateLimit from "express-rate-limit";
+import { startSubscriptionCron } from "./cron/subscriptionExpiry.js";
 
 import fs from "fs";
 
@@ -31,6 +32,11 @@ if (!fs.existsSync("uploads")) {
 const server = http.createServer(app);
 
 const allowedOrigins = ["http://localhost:3000", "https://smilebabahub.com"];
+
+app.use(
+  "/smilebaba/payments/webhook",
+  express.raw({ type: "application/json" }),
+);
 
 app.use(express.json({ limit: "30mb" }));
 app.use(express.urlencoded({ extended: true, limit: "30mb" }));
@@ -72,7 +78,7 @@ app.set("trust proxy", 1);
 
 app.use("/smilebaba/auth", authRoute);
 app.use("/smilebaba/products", productRoute);
-app.use("/smilebaba/payment", paymentRoute);
+app.use("/smilebaba/payments", paymentRoute);
 app.use("/smilebaba/chat", chatRoute);
 
 app.get("/", (req, res) => {
