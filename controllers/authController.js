@@ -7,33 +7,77 @@ import {
   generateAccessToken,
   generateRefreshToken,
 } from "../utils/generateTokens.js";
-
 import axios from "axios";
 
-//this function makes an API call to the geoapify API to get the IP address and the geolocation
+// ── Currency helper ────────────────────────────────────────────────────────
+// Extend this map as you expand to more countries
+const getCurrencyFromCountry = (country = "") => {
+  const c = country.toLowerCase();
+  if (c.includes("ghana"))
+    return { currency: "GHS", symbol: "₵", locale: "en-GH" };
+  if (c.includes("nigeria"))
+    return { currency: "NGN", symbol: "₦", locale: "en-NG" };
+  // Default fallback
+  return { currency: "GHS", symbol: "₵", locale: "en-GH" };
+};
+
+// ── Shared user serializer ─────────────────────────────────────────────────
+// Single place that decides what fields go to the frontend — keeps login,
+// refresh, and /me responses consistent so Redux never gets mismatched shapes
+const serializeUser = (user) => {
+  const lastLogin = user.loginHistory?.[user.loginHistory.length - 1];
+  const country = lastLogin?.country ?? "";
+  const { currency, symbol, locale } = getCurrencyFromCountry(country);
+
+  return {
+    _id: user._id,
+    username: user.username,
+    email: user.email,
+    phone: user.phone,
+    role: user.role,
+    city: user.city,
+    state: user.state,
+    profilePicture: user.profilePicture,
+    cartItems: user.cartItems,
+    subscription: user.subscription ?? null,
+    // ── Geo / currency ──
+    country,
+    currency, // "GHS" | "NGN"
+    symbol, // "₵"   | "₦"
+    locale, // "en-GH" | "en-NG"
+  };
+};
+
+// ── IP → Geolocation ───────────────────────────────────────────────────────
 const getLocationFromIP = async (ip) => {
   try {
     const response = await axios.get(
       `https://api.geoapify.com/v1/ipinfo?ip=${ip}&apiKey=${process.env.GEOAPIFY_API_KEY}`,
     );
-
     return {
       country: response.data.country?.name || "",
       city: response.data.city?.name || "",
       location:
-        response.data.city?.name + ", " + response.data.country?.name || "",
+        `${response.data.city?.name}, ${response.data.country?.name}` || "",
     };
   } catch (error) {
     console.log("Geoapify error:", error.message);
-    return {
-      country: "",
-      city: "",
-      location: "",
-    };
+    return { country: "", city: "", location: "" };
   }
 };
 
-// REGISTER (so user will be a Guest initially, and later be upgraded to a vendor upon his subscription)
+// ── Cookie options helper ──────────────────────────────────────────────────
+const cookieOptions = () => {
+  const isProd = process.env.NODE_ENV === "production";
+  return {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: isProd ? "none" : "lax",
+    path: "/",
+  };
+};
+
+// ── REGISTER ───────────────────────────────────────────────────────────────
 export const register = async (req, res) => {
   try {
     const { username, email, password, phone } = req.body;
@@ -42,13 +86,10 @@ export const register = async (req, res) => {
       return res.status(400).json({ message: "Required fields missing" });
     }
 
-    // here, we're extracting the value to be passed to the geolocation function to fetch the IP address and the geolocations. works for both the register and the login functions
     const ip =
       req.headers["x-forwarded-for"]?.split(",").shift() ||
       req.socket?.remoteAddress;
-
     const geoData = await getLocationFromIP(ip);
-
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const user = await User.create({
@@ -56,8 +97,6 @@ export const register = async (req, res) => {
       email,
       password: hashedPassword,
       phone,
-
-      // so instead of overiding IP and location anytime a users logs in, we want to store and keep track of it, so we put it inside an array called login history
       loginHistory: [
         {
           ip,
@@ -70,51 +109,34 @@ export const register = async (req, res) => {
     });
 
     res.status(200).json({
-      message: "Login successful",
-      user: {
-        username: user.username,
-        email: user.email,
-        phone: user.phone,
-        role: user.role,
-        city: user.city,
-        state: user.state,
-        profilePicture: user.profilePicture,
-        cartItems: user.cartItems,
-      },
+      message: "Registration successful",
+      user: serializeUser(user),
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
 
-
-
-
-//METHOD: POST, UNPROTECTED
-//smilebaba/auth/login
-//  LOGIN, this will work for both registered and guest users for their logins into the system
+// ── LOGIN ──────────────────────────────────────────────────────────────────
 export const login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
     const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(400).json({ message: "Invalid credentials" });
-    }
+    if (!user) return res.status(400).json({ message: "Invalid credentials" });
 
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
+    if (!isMatch)
       return res
         .status(400)
         .json({ message: "Incorrect username and password" });
-    }
 
     const ip =
       req.headers["x-forwarded-for"]?.split(",").shift() ||
       req.socket?.remoteAddress;
-
     const geoData = await getLocationFromIP(ip);
 
+    // Push new login event — this becomes the "last login" used for currency
     await User.updateOne(
       { _id: user._id },
       {
@@ -130,42 +152,26 @@ export const login = async (req, res) => {
       },
     );
 
-    const accessToken = generateAccessToken(user);
-    const refreshToken = generateRefreshToken(user);
+    // Reload user so loginHistory includes the entry we just pushed
+    const updatedUser = await User.findById(user._id);
 
-    // Add this at the top of authController.js
-    const isProd = process.env.NODE_ENV === "production";
-
-    const cookieOptions = {
-      httpOnly: true,
-      secure: isProd, // ✅ false on localhost, true in prod
-      sameSite: isProd ? "none" : "lax", // ✅ lax on localhost, none in prod
-      path: "/",
-    };
+    const accessToken = generateAccessToken(updatedUser);
+    const refreshToken = generateRefreshToken(updatedUser);
+    const opts = cookieOptions();
 
     res.cookie("accessToken", accessToken, {
-      ...cookieOptions,
+      ...opts,
       maxAge: 24 * 60 * 60 * 1000,
     });
-
     res.cookie("refreshToken", refreshToken, {
-      ...cookieOptions,
+      ...opts,
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
     res.status(200).json({
       message: "Login successful",
       accessToken,
-      user: {
-        username: user.username,
-        email: user.email,
-        phone: user.phone,
-        role: user.role,
-        city: user.city,
-        state: user.state,
-        profilePicture: user.profilePicture,
-        cartItems: user.cartItems,
-      },
+      user: serializeUser(updatedUser),
     });
   } catch (error) {
     console.error(error);
@@ -173,88 +179,39 @@ export const login = async (req, res) => {
   }
 };
 
-
+// ── GET CURRENT USER (/auth/me) 
+// Called by restoreSession after refresh — must return same shape as login
 export const getCurrentUser = async (req, res) => {
-  const user = await User.findById(req.user.userId).select("-password");
-
-  res.json(user);
-};
-
-
-
-
-
-//METHOD: POST, UNPROTECTED
-//smilebaba/auth/logout
-// Our logout logic lies here.
-export const logout = async (req, res) => {
   try {
-    // Add this at the top of authController.js
-    const isProd = process.env.NODE_ENV === "production";
+    const user = await User.findById(req.user.userId);
 
-    const cookieOptions = {
-      httpOnly: true,
-      secure: isProd, // ✅ false on localhost, true in prod
-      sameSite: isProd ? "none" : "lax", // ✅ lax on localhost, none in prod
-      path: "/",
-    };
+    if (!user) return res.status(404).json({ message: "User not found" });
 
-    res.clearCookie("accessToken", cookieOptions);
-    res.clearCookie("refreshToken", cookieOptions);
-
-    res.json({
-      message: "Logged out successfully",
-    });
+    res.status(200).json({ user: serializeUser(user) });
   } catch (error) {
-    res.status(500).json({
-      message: "Server error",
-    });
+    res.status(500).json({ message: "Server error" });
   }
 };
 
-
-
-
-
-
-//METHOD: POST, UNPROTECTED
-//smilebaba/auth/refresh
-// REFRESH TOKEN, to renew the access tokens when they expires
+// ── REFRESH TOKEN ──────────────────────────────────────────────────────────
 export const refresh = async (req, res) => {
   const token = req.cookies.refreshToken;
-
-  if (!token) {
-    return res.status(401).json({ message: "No refresh token" });
-  }
+  if (!token) return res.status(401).json({ message: "No refresh token" });
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
-
     const user = await User.findById(decoded.userId);
 
-    if (!user) {
+    if (!user)
       return res.status(401).json({ message: "User no longer exists" });
-    }
 
     const accessToken = generateAccessToken(user);
-
-    // Add this at the top of authController.js
-    const isProd = process.env.NODE_ENV === "production";
-
-    const cookieOptions = {
-      httpOnly: true,
-      secure: isProd, // ✅ false on localhost, true in prod
-      sameSite: isProd ? "none" : "lax", // ✅ lax on localhost, none in prod
-      path: "/",
-    };
+    const opts = cookieOptions();
 
     res.cookie("accessToken", accessToken, {
-      ...cookieOptions,
+      ...opts,
       maxAge: 24 * 60 * 60 * 1000,
     });
-
-    console.log("Cookies:", req.cookies);
-    console.log("Headers:", req.headers);
 
     return res.status(200).json({ accessToken, message: "Token refreshed" });
   } catch (error) {
@@ -262,17 +219,25 @@ export const refresh = async (req, res) => {
   }
 };
 
+// ── LOGOUT ─────────────────────────────────────────────────────────────────
+export const logout = async (req, res) => {
+  try {
+    const opts = cookieOptions();
+    res.clearCookie("accessToken", opts);
+    res.clearCookie("refreshToken", opts);
+    res.json({ message: "Logged out successfully" });
+  } catch (error) {
+    res.status(500).json({ message: "Server error" });
+  }
+};
 
-
-
+// ── FORGOT PASSWORD ────────────────────────────────────────────────────────
 export const forgotPassword = async (req, res) => {
   try {
     const { email } = req.body;
-
     const findUser = await User.findOne({ email });
-    if (!findUser) {
-      return res.status(404).json({ message: "user not found" });
-    }
+
+    if (!findUser) return res.status(404).json({ message: "User not found" });
 
     const resetToken = crypto.randomBytes(32).toString("hex");
     const hashedToken = crypto
@@ -282,24 +247,16 @@ export const forgotPassword = async (req, res) => {
 
     findUser.passwordResetToken = hashedToken;
     findUser.passwordResetExpires = Date.now() + 10 * 60 * 1000;
-
     await findUser.save();
 
-    // Create reset URL (frontend handles this)
-    const resetURL = `http://localhost:3000/reset-password/${resetToken}`;
+    const resetURL = `${process.env.NEXT_PUBLIC_APP_URL}/reset-password/${resetToken}`;
 
-    // Send email
     const transporter = nodemailer.createTransport({
       host: "smtp.gmail.com",
       port: 587,
       secure: false,
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
-      tls: {
-        rejectUnauthorized: false,
-      },
+      auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
+      tls: { rejectUnauthorized: false },
       family: 4,
     });
 
@@ -317,13 +274,10 @@ export const forgotPassword = async (req, res) => {
   }
 };
 
-//reset Password
-
+// ── RESET PASSWORD ─────────────────────────────────────────────────────────
 export const resetPassword = async (req, res) => {
   try {
     const { token, password } = req.body;
-
-    // Hash the token to compare with database
     const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
 
     const user = await User.findOne({
@@ -331,17 +285,12 @@ export const resetPassword = async (req, res) => {
       passwordResetExpires: { $gt: Date.now() },
     });
 
-    if (!user) {
+    if (!user)
       return res.status(400).json({ message: "Token is invalid or expired" });
-    }
 
-    // Hash new password
     user.password = await bcrypt.hash(password, 10);
-
-    // Clear reset token and expiry
     user.passwordResetToken = undefined;
     user.passwordResetExpires = undefined;
-
     await user.save();
 
     res.json({ message: "Password reset successful" });
