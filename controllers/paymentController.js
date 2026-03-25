@@ -1,29 +1,39 @@
-import axios from "axios";
 import User from "../models/user.js";
+import Marketer from "../models/marketerModel.js";
 import Purchase from "../models/purchaseModel.js";
 import Notification from "../models/notificationModel.js";
 import { PRICING, PLAN_NAMES } from "../config/pricing.js";
+import { findMarketerByCode } from "./marketerController.js";
+import {
+  initializeGatewayPayment,
+  verifyGatewayPayment,
+  verifyWebhookSignature,
+} from "../lib/paymentGateway.js";
+import { publish, CHANNELS } from "../lib/redis.js";
 
-// ── Shared helper: activate subscription + record purchase + notify ─────────
+const REFERRAL_DISCOUNT = 0.2;
+
+function applyDiscount(amount, hasReferral) {
+  if (!hasReferral || amount === 0) return amount;
+  return +(amount * (1 - REFERRAL_DISCOUNT)).toFixed(2);
+}
+
 async function activateSubscription({
   userId,
   planId,
   billingCycle,
   payment,
   txRef,
+  marketerId,
 }) {
   const now = new Date();
-
   const expiresAt =
     billingCycle === "monthly"
       ? new Date(new Date(now).setMonth(now.getMonth() + 1))
       : new Date(new Date(now).setFullYear(now.getFullYear() + 1));
 
-  const planName = PLAN_NAMES[planId] ?? planId;
-  const cycleLabel = billingCycle === "monthly" ? "Monthly" : "Yearly";
-  const title = `${planName} ${cycleLabel} Plan`;
+  const title = `${PLAN_NAMES[planId] ?? planId} ${billingCycle === "monthly" ? "Monthly" : "Yearly"} Plan`;
 
-  // 1. Update user role + subscription
   await User.findByIdAndUpdate(userId, {
     role: "vendor",
     subscription: {
@@ -33,10 +43,10 @@ async function activateSubscription({
       currency: payment.currency,
       startedAt: now,
       expiresAt,
+      referredBy: marketerId ?? null,
     },
   });
 
-  // 2. Record purchase history
   await Purchase.findOneAndUpdate(
     { txRef },
     {
@@ -52,11 +62,11 @@ async function activateSubscription({
       periodStart: now,
       periodEnd: expiresAt,
       gatewayMeta: payment,
+      marketerId: marketerId ?? null,
     },
     { upsert: true, new: true },
   );
 
-  // 3. Fire activation notification (dedupe by txRef)
   await Notification.findOneAndUpdate(
     { dedupeKey: `activated-${txRef}` },
     {
@@ -71,36 +81,108 @@ async function activateSubscription({
     { upsert: true },
   );
 
+  if (marketerId) {
+    const originalPrice = PRICING[planId][billingCycle][payment.currency];
+    const commission = +(originalPrice * REFERRAL_DISCOUNT).toFixed(2);
+    const earningsField =
+      payment.currency === "NGN" ? "totalEarningsNGN" : "totalEarningsGHS";
+    const pendingField =
+      payment.currency === "NGN" ? "pendingPayoutNGN" : "pendingPayoutGHS";
+
+    await Marketer.findByIdAndUpdate(marketerId, {
+      $inc: {
+        totalReferrals: 1,
+        activeReferrals: 1,
+        [earningsField]: commission,
+        [pendingField]: commission,
+      },
+      $push: {
+        commissions: {
+          vendor: userId,
+          planId,
+          billingCycle,
+          originalAmount: originalPrice,
+          discountAmount: payment.amount,
+          commission,
+          currency: payment.currency,
+          txRef,
+          paidOut: false,
+        },
+      },
+    });
+
+    await publish(CHANNELS.statsUpdate, { marketerId: String(marketerId) });
+
+    await Notification.create({
+      user: marketerId,
+      type: "boost_approved",
+      title: "New referral commission 💰",
+      message: `You earned ${payment.currency} ${commission} from a ${title} referral.`,
+      actionUrl: "/marketer/dashboard",
+      actionLabel: "View earnings",
+    });
+  }
+
   return expiresAt;
 }
 
-// ── INITIALIZE PAYMENT ─────────────────────────────────────────────────────
+export const checkReferralCode = async (req, res) => {
+  try {
+    const marketer = await findMarketerByCode(req.params.code);
+    if (!marketer)
+      return res
+        .status(404)
+        .json({ valid: false, message: "Invalid referral code" });
+    res
+      .status(200)
+      .json({
+        valid: true,
+        discount: REFERRAL_DISCOUNT * 100,
+        marketerName: marketer.name,
+      });
+  } catch (error) {
+    res.status(500).json({ message: "Validation failed" });
+  }
+};
+
 export const initializePayment = async (req, res) => {
   try {
-    const { planId, billingCycle, currency = "GHS", returnUrl } = req.body;
+    const { planId, billingCycle, returnUrl, referralCode } = req.body;
     const userId = req.user.userId;
+    const countryCode = req.countryCode;
+    const currency = req.gatewayCurrency;
 
-    // Validate plan + cycle + currency
     const plan = PRICING[planId];
     if (!plan)
       return res.status(400).json({ message: "Invalid plan selected" });
-
     const cycle = plan[billingCycle];
     if (!cycle)
       return res.status(400).json({ message: "Invalid billing cycle" });
-
-    const amount = cycle[currency];
-    if (amount === undefined)
+    const baseAmount = cycle[currency];
+    if (baseAmount === undefined)
       return res.status(400).json({ message: "Unsupported currency" });
 
-    // Free plan — skip payment gateway
-    if (amount === 0) {
+    let marketerId = null,
+      finalAmount = baseAmount,
+      discountApplied = false;
+    if (referralCode?.trim()) {
+      const marketer = await findMarketerByCode(referralCode.trim());
+      if (marketer) {
+        marketerId = marketer._id;
+        finalAmount = applyDiscount(baseAmount, true);
+        discountApplied = true;
+      }
+    }
+
+    if (finalAmount === 0) {
+      const txRef = `free-${userId}-${Date.now()}`;
       await activateSubscription({
         userId,
         planId,
         billingCycle,
         payment: { id: "free", amount: 0, currency },
-        txRef: `free-${userId}-${Date.now()}`,
+        txRef,
+        marketerId,
       });
       return res
         .status(200)
@@ -111,47 +193,60 @@ export const initializePayment = async (req, res) => {
     if (!existingUser)
       return res.status(404).json({ message: "User not found" });
 
-    const tx_ref = `smilebaba-${userId}-${Date.now()}`;
-
-    // Persist a pending purchase record immediately (for audit trail)
+    const tx_ref = `smilebaba-${countryCode.toLowerCase()}-${userId}-${Date.now()}`;
     await Purchase.create({
       user: userId,
       txRef: tx_ref,
       title: `${PLAN_NAMES[planId] ?? planId} ${billingCycle}`,
       planId,
       billingCycle,
-      amount,
+      amount: finalAmount,
       currency,
       status: "pending",
+      marketerId: marketerId ?? null,
     });
 
-    // Build redirect URL — encode returnUrl so we resume correctly
-    const encodedReturn = encodeURIComponent(returnUrl || "/vendor/dashboard");
-    const redirect_url = `${process.env.NEXT_PUBLIC_APP_URL}/payment-success?returnUrl=${encodedReturn}`;
-
-    const response = await axios.post(
-      "https://api.flutterwave.com/v3/payments",
-      {
-        tx_ref,
-        amount,
-        currency,
-        redirect_url,
-        customer: {
-          email: existingUser.email,
-          name: existingUser.name,
-          phonenumber: existingUser.phone,
-        },
-        meta: { userId, planId, billingCycle, returnUrl },
-        customizations: {
-          title: "SmileBaba Subscription",
-          description: `${PLAN_NAMES[planId] ?? planId} ${billingCycle} subscription`,
-          logo: `${process.env.NEXT_PUBLIC_APP_URL}/logo.png`,
-        },
+    const redirect_url = `${process.env.NEXT_PUBLIC_APP_URL}/payment-success?countryCode=${countryCode}&returnUrl=${encodeURIComponent(returnUrl || "/vendor/dashboard")}`;
+    const payload = {
+      tx_ref,
+      amount: finalAmount,
+      currency,
+      redirect_url,
+      customer: {
+        email: existingUser.email,
+        name: existingUser.username,
+        phonenumber: existingUser.phone,
       },
-      { headers: { Authorization: `Bearer ${process.env.FLW_SECRET_KEY}` } },
-    );
+      meta: {
+        userId,
+        planId,
+        billingCycle,
+        returnUrl,
+        countryCode,
+        marketerId: String(marketerId ?? ""),
+      },
+      customizations: {
+        title: "SmileBaba Subscription",
+        description: `${PLAN_NAMES[planId] ?? planId} ${billingCycle}${discountApplied ? " (20% referral discount)" : ""}`,
+        logo: `${process.env.NEXT_PUBLIC_APP_URL}/logo.png`,
+      },
+    };
 
-    res.status(200).json({ paymentLink: response.data.data.link });
+    const { paymentLink } = await initializeGatewayPayment({
+      countryCode,
+      payload,
+    });
+    res
+      .status(200)
+      .json({
+        paymentLink,
+        countryCode,
+        currency,
+        originalAmount: baseAmount,
+        finalAmount,
+        discountApplied,
+        discountPercent: discountApplied ? 20 : 0,
+      });
   } catch (error) {
     console.error(
       "initializePayment error:",
@@ -161,146 +256,125 @@ export const initializePayment = async (req, res) => {
   }
 };
 
-// ── VERIFY PAYMENT (redirect callback) ────────────────────────────────────
 export const verifyPayment = async (req, res) => {
   try {
     const { transaction_id, returnUrl } = req.query;
-
-    const response = await axios.get(
-      `https://api.flutterwave.com/v3/transactions/${transaction_id}/verify`,
-      { headers: { Authorization: `Bearer ${process.env.FLW_SECRET_KEY}` } },
-    );
-
-    const payment = response.data.data;
-
-    if (payment.status !== "successful") {
+    const countryCode = req.countryCode;
+    const payment = await verifyGatewayPayment({
+      countryCode,
+      transactionId: transaction_id,
+    });
+    if (payment.status !== "successful")
       return res.redirect(
         `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=not_successful`,
       );
-    }
 
-    const { userId, planId, billingCycle } = payment.meta;
-    const tx_ref = payment.tx_ref;
-
-    // Anti-fraud: amount must match expected
-    const expectedAmount = PRICING[planId][billingCycle][payment.currency];
-    if (payment.amount !== expectedAmount) {
-      console.error("Amount mismatch!", {
-        expected: expectedAmount,
-        got: payment.amount,
-      });
+    const { userId, planId, billingCycle, marketerId } = payment.meta;
+    const baseAmount = PRICING[planId]?.[billingCycle]?.[payment.currency];
+    const expectedAmount = marketerId
+      ? applyDiscount(baseAmount, true)
+      : baseAmount;
+    if (payment.amount !== expectedAmount)
       return res.redirect(
         `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=amount_mismatch`,
       );
-    }
 
     await activateSubscription({
       userId,
       planId,
       billingCycle,
       payment,
-      txRef: tx_ref,
+      txRef: payment.tx_ref,
+      marketerId: marketerId || null,
     });
-
-    // Decode and resume the user's original destination
     const destination = returnUrl
       ? decodeURIComponent(returnUrl)
       : "/vendor/dashboard";
-
     res.redirect(
       `${process.env.NEXT_PUBLIC_APP_URL}${destination}?subscribed=1`,
     );
   } catch (error) {
-    console.error("verifyPayment error:", error);
     res.redirect(
       `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=server_error`,
     );
   }
 };
 
-// ── WEBHOOK (production — idempotent) ─────────────────────────────────────
-export const flutterwaveWebhook = async (req, res) => {
+export const paymentWebhook = async (req, res) => {
   try {
-    const secretHash = process.env.FLW_WEBHOOK_SECRET;
-    const signature = req.headers["verif-hash"];
-
-    if (!signature || signature !== secretHash) return res.status(401).end();
-
+    const countryCode = req.countryCode;
+    const isValid = await verifyWebhookSignature({
+      countryCode,
+      headers: req.headers,
+      body: req.body,
+    });
+    if (!isValid) return res.status(401).end();
     const payload = req.body;
-
-    if (
-      payload.event === "charge.completed" &&
-      payload.data.status === "successful"
-    ) {
+    const isCompleted =
+      payload.event === "charge.completed" ||
+      payload.event === "charge.success";
+    const isSuccessful =
+      payload.data?.status === "successful" ||
+      payload.data?.status === "success";
+    if (isCompleted && isSuccessful) {
       const payment = payload.data;
-      const { userId, planId, billingCycle } = payment.meta;
-
-      const expectedAmount =
-        PRICING[planId]?.[billingCycle]?.[payment.currency];
-      if (payment.amount !== expectedAmount) return res.status(400).end();
-
-      // Idempotent — activateSubscription uses upsert internally
+      const { userId, planId, billingCycle, marketerId } =
+        payment.meta ?? payment.metadata ?? {};
+      const amount =
+        payment.currency === "NGN" && payment.amount > 10000
+          ? payment.amount / 100
+          : payment.amount;
+      const base = PRICING[planId]?.[billingCycle]?.[payment.currency];
+      if (amount !== (marketerId ? applyDiscount(base, true) : base))
+        return res.status(400).end();
       await activateSubscription({
         userId,
         planId,
         billingCycle,
-        payment,
-        txRef: payment.tx_ref,
+        payment: { ...payment, amount },
+        txRef: payment.tx_ref ?? payment.reference,
+        marketerId: marketerId || null,
       });
     }
-
     res.status(200).end();
   } catch (error) {
-    console.error("webhook error:", error);
     res.status(500).end();
   }
 };
 
-// ── PURCHASE HISTORY ───────────────────────────────────────────────────────
 export const getPurchaseHistory = async (req, res) => {
   try {
-    const userId = req.user.userId;
     const purchases = await Purchase.find({
-      user: userId,
+      user: req.user.userId,
       status: "successful",
     })
       .sort({ createdAt: -1 })
       .select(
         "title planId billingCycle amount currency periodStart periodEnd createdAt txRef",
       );
-
     res.status(200).json({ purchases });
   } catch (error) {
-    console.error("getPurchaseHistory error:", error);
     res.status(500).json({ message: "Failed to fetch purchase history" });
   }
 };
 
-// ── NOTIFICATIONS ─────────────────────────────────────────────────────────
 export const getNotifications = async (req, res) => {
   try {
     const userId = req.user.userId;
-    const notifications = await Notification.find({ user: userId })
-      .sort({ createdAt: -1 })
-      .limit(20);
-
-    const unreadCount = await Notification.countDocuments({
-      user: userId,
-      isRead: false,
-    });
-
+    const [notifications, unreadCount] = await Promise.all([
+      Notification.find({ user: userId }).sort({ createdAt: -1 }).limit(20),
+      Notification.countDocuments({ user: userId, isRead: false }),
+    ]);
     res.status(200).json({ notifications, unreadCount });
   } catch (error) {
-    console.error("getNotifications error:", error);
     res.status(500).json({ message: "Failed to fetch notifications" });
   }
 };
 
 export const markNotificationsRead = async (req, res) => {
   try {
-    const userId = req.user.userId;
     await Notification.updateMany(
-      { user: userId, isRead: false },
+      { user: req.user.userId, isRead: false },
       { isRead: true },
     );
     res.status(200).json({ message: "All notifications marked as read" });

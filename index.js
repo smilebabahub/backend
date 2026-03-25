@@ -18,8 +18,11 @@ import chatRoute from "./routes/chatRoute.js";
 import Message from "./models/Message.js";
 import rateLimit from "express-rate-limit";
 import { startSubscriptionCron } from "./cron/subscriptionExpiry.js";
+import marketerRoutes, { updatesRouter } from "./routes/marketerRoute.js";
+import { checkReferralCode } from "./controllers/paymentController.js";
 
 import fs from "fs";
+import authMiddleware from "./middleware/authMiddleWare.js";
 
 
 //CONFIGURATIONS
@@ -31,26 +34,43 @@ if (!fs.existsSync("uploads")) {
 
 const server = http.createServer(app);
 
-const allowedOrigins = ["http://localhost:3000", "https://smilebabahub.com"];
-
 app.use(
-  "/smilebaba/payments/webhook",
+  "/smilebaba/payments/gh/webhook",
+  express.raw({ type: "application/json" }),
+);
+app.use(
+  "/smilebaba/payments/ng/webhook",
+  express.raw({ type: "application/json" }),
+);
+app.use(
+  "/smilebaba/payments/intl/webhook",
   express.raw({ type: "application/json" }),
 );
 
 app.use(express.json({ limit: "30mb" }));
 app.use(express.urlencoded({ extended: true, limit: "30mb" }));
+const ALLOWED_ORIGINS = [
+  "http://localhost:3000",
+  "http://localhost:3001",
+  "https://smilebabahub.com", 
+  "https://www.smilebabahub.com",
+];
+
 app.use(
   cors({
-    origin: function (origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+
+      if (ALLOWED_ORIGINS.includes(origin)) {
         callback(null, true);
       } else {
-        callback(new Error("Not allowed by CORS"));
+        console.warn(`CORS blocked origin: ${origin}`);
+        callback(new Error(`Origin ${origin} not allowed by CORS`));
       }
     },
-    credentials: true,
-    exposedHeaders: ["set-cookie"],
+    credentials: true, 
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   }),
 );
 
@@ -80,6 +100,16 @@ app.use("/smilebaba/auth", authRoute);
 app.use("/smilebaba/products", productRoute);
 app.use("/smilebaba/payments", paymentRoute);
 app.use("/smilebaba/chat", chatRoute);
+app.use("/smilebaba/marketers", marketerRoutes);
+app.use("/smilebaba/updates",   updatesRouter);
+app.get("/smilebaba/payments/referral/:code", authMiddleware, checkReferralCode);
+
+// ── Redis connection ────────────────────────────────────────────────────────
+import { connectRedis } from "./lib/redis.js";
+await connectRedis();
+
+// ── Cron ───────────────────────────────────────────────────────────────────
+startSubscriptionCron();
 
 app.get("/", (req, res) => {
   res.send("SmileBabaHub API Running");

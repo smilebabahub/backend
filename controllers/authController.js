@@ -7,19 +7,9 @@ import {
   generateAccessToken,
   generateRefreshToken,
 } from "../utils/generateTokens.js";
-import axios from "axios";
+import { getCurrencyFromCountry } from "../activities/getCurrencyHelper.js";
+import { getLocationFromIP } from "../activities/getLocation.js";
 
-// ── Currency helper ────────────────────────────────────────────────────────
-// Extend this map as you expand to more countries
-const getCurrencyFromCountry = (country = "") => {
-  const c = country.toLowerCase();
-  if (c.includes("ghana"))
-    return { currency: "GHS", symbol: "₵", locale: "en-GH" };
-  if (c.includes("nigeria"))
-    return { currency: "NGN", symbol: "₦", locale: "en-NG" };
-  // Default fallback
-  return { currency: "GHS", symbol: "₵", locale: "en-GH" };
-};
 
 // ── Shared user serializer ─────────────────────────────────────────────────
 // Single place that decides what fields go to the frontend — keeps login,
@@ -42,29 +32,13 @@ const serializeUser = (user) => {
     subscription: user.subscription ?? null,
     // ── Geo / currency ──
     country,
-    currency, // "GHS" | "NGN"
-    symbol, // "₵"   | "₦"
-    locale, // "en-GH" | "en-NG"
+    currency, 
+    symbol, 
+    locale,
   };
 };
 
-// ── IP → Geolocation ───────────────────────────────────────────────────────
-const getLocationFromIP = async (ip) => {
-  try {
-    const response = await axios.get(
-      `https://api.geoapify.com/v1/ipinfo?ip=${ip}&apiKey=${process.env.GEOAPIFY_API_KEY}`,
-    );
-    return {
-      country: response.data.country?.name || "",
-      city: response.data.city?.name || "",
-      location:
-        `${response.data.city?.name}, ${response.data.country?.name}` || "",
-    };
-  } catch (error) {
-    console.log("Geoapify error:", error.message);
-    return { country: "", city: "", location: "" };
-  }
-};
+
 
 // ── Cookie options helper ──────────────────────────────────────────────────
 const cookieOptions = () => {
@@ -76,6 +50,7 @@ const cookieOptions = () => {
     path: "/",
   };
 };
+
 
 // ── REGISTER ───────────────────────────────────────────────────────────────
 export const register = async (req, res) => {
@@ -163,6 +138,7 @@ export const login = async (req, res) => {
       ...opts,
       maxAge: 24 * 60 * 60 * 1000,
     });
+
     res.cookie("refreshToken", refreshToken, {
       ...opts,
       maxAge: 7 * 24 * 60 * 60 * 1000,
@@ -179,6 +155,8 @@ export const login = async (req, res) => {
   }
 };
 
+
+
 // ── GET CURRENT USER (/auth/me) 
 // Called by restoreSession after refresh — must return same shape as login
 export const getCurrentUser = async (req, res) => {
@@ -192,6 +170,8 @@ export const getCurrentUser = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
+
+
 
 // ── REFRESH TOKEN ──────────────────────────────────────────────────────────
 export const refresh = async (req, res) => {
@@ -219,6 +199,8 @@ export const refresh = async (req, res) => {
   }
 };
 
+
+
 // ── LOGOUT ─────────────────────────────────────────────────────────────────
 export const logout = async (req, res) => {
   try {
@@ -230,6 +212,8 @@ export const logout = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
+
+
 
 // ── FORGOT PASSWORD ────────────────────────────────────────────────────────
 export const forgotPassword = async (req, res) => {
