@@ -73,8 +73,8 @@ const marketerSchema = new mongoose.Schema(
 );
 
 // ── Auto-generate referral code before first save ──────────────────────────
-marketerSchema.pre("save", async function (next) {
-  if (this.referralCode) return next();
+marketerSchema.pre("save", async function () {
+  if (this.referralCode) return; // already set — nothing to do
 
   const base = this.name
     .split(" ")[0]
@@ -83,7 +83,6 @@ marketerSchema.pre("save", async function (next) {
     .slice(0, 6);
   const random = Math.random().toString(36).substring(2, 6).toUpperCase();
   this.referralCode = `SMB-${base}-${random}`;
-  // next();
 });
 
 const Marketer =
