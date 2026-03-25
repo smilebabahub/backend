@@ -18,6 +18,23 @@ const messageSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+
+    // NEW FEATURES
+    edited: {
+      type: Boolean,
+      default: false,
+    },
+
+    deleted: {
+      type: Boolean,
+      default: false,
+    },
+
+    deletedFor: [
+      {
+        type: String, // userId
+      },
+    ],
   },
   { timestamps: true },
 );
