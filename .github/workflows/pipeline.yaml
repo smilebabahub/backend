@@ -9,7 +9,7 @@ on:
 env:
   NODE_VERSION: "20"
 
-# ── Jobs ──────────────────────────────────────────────────────────────────────
+# ── Jobs ───────────────────────────
 jobs:
 
   # ── 1. Test & Build ──────────────────────────────────────────────────────────
@@ -51,8 +51,7 @@ jobs:
       - name: Trigger Render deploy (backend)
         run: |
           curl --fail -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
-        # Add RENDER_DEPLOY_HOOK_URL in GitHub → Settings → Secrets
-        # Get it from: Render dashboard → your service → Settings → Deploy Hook
+
 
       - name: Wait for Render to finish deploying
         run: sleep 60                        # give Render time to build + start
