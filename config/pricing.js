@@ -8,16 +8,16 @@ export const PRICING = {
     yearly: { GHS: 0, NGN: 0 },
   },
   standard: {
-    monthly: { GHS: 49.99, NGN: 29999 },
-    yearly: { GHS: 599.88, NGN: 359880 },
+    monthly: { GHS: 99.99, NGN: 650000 },
+    yearly: { GHS: 1199.88, NGN: 7800000 },
   },
   popular: {
-    monthly: { GHS: 74.99, NGN: 44999 },
-    yearly: { GHS: 899.99, NGN: 539994 },
+    monthly: { GHS: 249.99, NGN: 1800000 },
+    yearly: { GHS: 2999.88, NGN: 21600000 },
   },
   premium: {
-    monthly: { GHS: 99.99, NGN: 59999 },
-    yearly: { GHS: 1199.0, NGN: 719400 },
+    monthly: { GHS: 499.99, NGN: 4999999 },
+    yearly: { GHS: 5999.88, NGN: 59999988 },
   },
 };
 
