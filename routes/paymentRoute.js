@@ -17,7 +17,7 @@ const router = express.Router();
 // never needs to parse the URL itself
 const CURRENCY_MAP = { gh: "GHS", ng: "NGN", intl: "USD" };
 
-function withCountry(code) {
+export function withCountry(code) {
   return (req, _res, next) => {
     req.countryCode = code.toUpperCase();
     req.gatewayCurrency = CURRENCY_MAP[code.toLowerCase()] ?? "USD";

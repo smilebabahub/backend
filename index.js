@@ -23,6 +23,8 @@ import { checkReferralCode } from "./controllers/paymentController.js";
 
 import fs from "fs";
 import authMiddleware from "./middleware/authMiddleWare.js";
+import adBoostPaymentRoutes from "./routes/adBoostPaymentRoute.js";
+
 
 
 //CONFIGURATIONS
@@ -104,6 +106,7 @@ app.use("/smilebaba/marketers", marketerRoutes);
 app.use("/smilebaba/updates",   updatesRouter);
 app.get("/smilebaba/payments/referral/:code", authMiddleware, checkReferralCode);
 app.use("/smilebaba/ads", adRoute);
+app.use("/smilebaba/payments/boost", adBoostPaymentRoutes);
 
 // ── Redis connection ────────────────────────────────────────────────────────
 import { connectRedis } from "./lib/redis.js";
