@@ -110,9 +110,19 @@ export const getAds = async (req, res) => {
       page = 1, limit = 20,
     } = req.query;
 
+    // ── Country is REQUIRED — we never show cross-country ads ─────────────
+    // If no country is sent, return empty rather than leaking all countries.
+    if (!country) {
+      return res.status(200).json({
+        ads: [],
+        meta: { total: 0, page: 1, limit: Number(limit), totalPages: 0, hasNext: false },
+      });
+    }
+
     const isDev = process.env.NODE_ENV !== "production";
 
     const filter = {
+      "location.country": country,   // ← always applied
       isSold:   false,
       isPaused: false,
       $or: [
@@ -121,14 +131,10 @@ export const getAds = async (req, res) => {
       ],
     };
 
-    // In production: only show approved ads and active listings.
-    // In development: show all ads so you can see newly posted ads immediately.
     if (!isDev) {
-      filter.isActive           = true;
+      filter.isActive            = true;
       filter["moderation.status"] = "approved";
     }
-
-    if (country)   filter["location.country"]  = country;
     if (region)    filter["location.region"]   = { $regex: region, $options: "i" };
     if (city)      filter["location.city"]     = { $regex: city,   $options: "i" };
     if (category)  filter["category.main"]     = category;

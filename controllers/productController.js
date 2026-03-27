@@ -21,7 +21,16 @@ export const getProducts = async (req, res) => {
 
     const isDev = process.env.NODE_ENV !== "production";
 
+    // ── Country is REQUIRED ────────────────────────────────────────────────
+    if (!country) {
+      return res.status(200).json({
+        products: [],
+        meta: { total: 0, page: 1, limit: Number(limit), totalPages: 0, hasNext: false },
+      });
+    }
+
     const filter = {
+      "location.country": country,   // ← always applied
       isSold:   false,
       isPaused: false,
     };
@@ -31,7 +40,6 @@ export const getProducts = async (req, res) => {
       filter["moderation.status"] = "approved";
     }
 
-    if (country)              filter["location.country"]  = country;
     if (category)             filter["category.main"]     = category;
     if (sub)                  filter["category.sub"]      = sub;
     if (featured === "true")  filter.isFeatured           = true;
