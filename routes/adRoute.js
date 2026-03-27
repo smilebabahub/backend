@@ -1,24 +1,44 @@
+// routes/adRoutes.js
 import express from "express";
-import upload from "../middleware/uploadMiddleware.js";
-import protect from "../middleware/protect.js";
-
 import {
   createAd,
   getAds,
-  getSingleAd,
+  getAdById,
+  getAdBySlug,
   updateAd,
   deleteAd,
+  boostAd,
+  markAsSold,
+  togglePause,
+  recordContactClick,
+  getMyAds,
+  moderateAd,
+  getSearchSuggestions,
 } from "../controllers/adController.js";
+import { requireVendor } from "../middleware/requireVendo.js";
+import authMiddleware from "../middleware/authMiddleWare.js";
 
-// const router = express.Router();
+const adRoute = express.Router();
 
-// Yoo, a user does not need authentication to be able to see the various adds posted, so we take of the protection here, okay
-router.get("/", getAds);
-router.get("/:id", getSingleAd);
+// ── Public routes ──────────────────────────────────────────────────────────
+adRoute.get("/", getAds); // GET  /ads
+adRoute.get("/suggestions", getSearchSuggestions); // GET  /ads/suggestions?q=
+adRoute.get("/slug/:slug", getAdBySlug); // GET  /ads/slug/:slug
+adRoute.get("/:id", getAdById); // GET  /ads/:id
 
-// so all this routes are protected under the authentication
-router.post("/create", protect, upload.array("images", 5), createAd);
-router.put("/:id", protect, upload.array("images", 5), updateAd);
-router.delete("/:id", protect, deleteAd);
+// ── Authenticated routes (any logged-in user) ──────────────────────────────
+adRoute.post("/:id/contact-click", authMiddleware, recordContactClick); // POST /ads/:id/contact-click
 
-// export default router;
+// ── Vendor-only routes ─────────────────────────────────────────────────────
+adRoute.get("/my", authMiddleware, requireVendor, getMyAds); // GET   /ads/my
+adRoute.post("/", authMiddleware, requireVendor, createAd); // POST  /ads
+adRoute.patch("/:id", authMiddleware, updateAd); // PATCH /ads/:id  (owner or admin)
+adRoute.delete("/:id", authMiddleware, deleteAd); // DELETE /ads/:id (owner or admin)
+adRoute.post("/:id/boost", authMiddleware, requireVendor, boostAd); // POST  /ads/:id/boost
+adRoute.patch("/:id/sold", authMiddleware, requireVendor, markAsSold); // PATCH /ads/:id/sold
+adRoute.patch("/:id/pause", authMiddleware, requireVendor, togglePause); // PATCH /ads/:id/pause
+
+// ── Admin-only routes ──────────────────────────────────────────────────────
+adRoute.patch("/:id/moderate", authMiddleware, moderateAd); // PATCH /ads/:id/moderate
+
+export default adRoute;

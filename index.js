@@ -11,7 +11,7 @@ import { Server } from "socket.io";
 
 import connectDB from "./config/db.js";
 import authRoute from "./routes/authRoute.js";
-//import adRoute from "./routes/adRoute.js";
+import adRoute from "./routes/adRoute.js";
 import productRoute from "./routes/productRoute.js";
 import paymentRoute from "./routes/paymentRoute.js";
 import chatRoute from "./routes/chatRoute.js";
@@ -103,6 +103,7 @@ app.use("/smilebaba/chat", chatRoute);
 app.use("/smilebaba/marketers", marketerRoutes);
 app.use("/smilebaba/updates",   updatesRouter);
 app.get("/smilebaba/payments/referral/:code", authMiddleware, checkReferralCode);
+app.use("/smilebaba/ads", adRoute);
 
 // ── Redis connection ────────────────────────────────────────────────────────
 import { connectRedis } from "./lib/redis.js";
