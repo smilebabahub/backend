@@ -1,68 +1,31 @@
-import express from "express";
-import { upload, processImages } from "../middleware/upload.middleware.js";
-import protect from "../middleware/protect.js";
+// routes/productRoutes.js
+// Matches frontend calls from productsActions.ts:
+//   GET  /products          → fetchProducts (public feed)
+//   GET  /products/my       → fetchMyProducts (vendor)
+//   GET  /products/:id      → fetchProductById
+//   DELETE /products/:id    → deleteProduct (owner/admin)
+//
 
+import express from "express";
+import { requireVendor } from "../middleware/requireVendo.js";
+
+// ── Controller — replace these with your actual product controller ─────────
+// If your products are handled by a different model (Listing, Product, etc.)
+// point these imports at that controller file.
 import {
-  createProduct,
-  getAllProducts,
-  getSingleProduct,
-  updateProduct,
-  deleteProduct,
+  getProducts,
+  getProductById,
+  getMyProducts,
+  deleteProductById,
 } from "../controllers/productController.js";
-import subscribedOnly from "../middleware/subscriptionGuard.js";
-import { vendorOnly } from "../middleware/roleGuard.js";
-import Product from "../models/Product.js";
+import authMiddleware from "../middleware/authMiddleWare.js";
 
 const router = express.Router();
 
-// Everyone can view
-router.get("/", getAllProducts);
-router.get("/:id", getSingleProduct);
-
-//CREATE (Any Logged-in User)
-
-router.post(
-  "/create",
-  protect,
-  upload.array("images", 5),
-  processImages,
-  createProduct,
-);
-
-// router.post(
-//   "/products/create",
-//   authMiddleware,
-//   upload.array("images", 5),
-//   processImages,
-//   async (req, res) => {
-//     const product = await Product.create({
-//       ...req.body,
-//       images: req.processedImages,
-//       user: req.user.id,
-//     });
-
-//     res.status(201).json(product);
-//   },
-// );
-
-
-//UPDATE (Owner Vendor or Admin)
-router.put("/:id", protect, upload.array("images", 5), updateProduct);
-
-//DELETE (Owner Vendor or Admin)
-router.delete("/:id", protect, deleteProduct);
-
-router.get("/vendor/my-products", protect, vendorOnly, getAllProducts);
-
-router.patch(
-  "/:id",
-  protect,
-  vendorOnly,
-  subscribedOnly,
-  upload.array("images", 5),
-  updateProduct,
-);
-
-router.delete("/:id", protect, vendorOnly, subscribedOnly, deleteProduct);
+// ── IMPORTANT: static paths must come BEFORE dynamic :id ───────────────────
+router.get("/my", authMiddleware, requireVendor, getMyProducts); // GET /products/my
+router.get("/", getProducts); // GET /products
+router.get("/:id", getProductById); // GET /products/:id
+router.delete("/:id", authMiddleware, deleteProductById); // DELETE /products/:id
 
 export default router;

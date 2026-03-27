@@ -4,18 +4,7 @@
 //   1. App version changes (new deploy → client reloads automatically)
 //   2. Marketer stats updates (commission credited → dashboard refreshes)
 
-import { createClient } from "redis";
-import { CHANNELS, publish } from "../lib/redis.js";
-
-// Each SSE connection gets its own subscriber client
-// (Redis subscriber clients can't do other operations)
-async function createSubscriberClient() {
-  const sub = createClient({
-    url: process.env.REDIS_URL ?? "redis://localhost:6379",
-  });
-  await sub.connect();
-  return sub;
-}
+import { CHANNELS, publish, createSubscriberClient } from "../lib/redis.js";
 
 // ── App version SSE (/updates/app) ─────────────────────────────────────────
 // Browser connects once and stays connected.
@@ -25,16 +14,18 @@ export const appUpdatesSSE = async (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-store, no-transform");
   res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no"); // disable Nginx buffering
+  res.setHeader("X-Accel-Buffering", "no");
   res.flushHeaders();
 
-  // Send a heartbeat every 25s to keep the connection alive through proxies
-  const heartbeat = setInterval(() => {
-    res.write(": heartbeat\n\n");
-  }, 25_000);
+  const heartbeat = setInterval(() => res.write(": heartbeat\n\n"), 25_000);
 
-  // Subscribe to app update channel
   const sub = await createSubscriberClient();
+
+  // If Redis unavailable, keep SSE open with just heartbeats
+  if (!sub) {
+    req.on("close", () => clearInterval(heartbeat));
+    return;
+  }
 
   await sub.subscribe(CHANNELS.appUpdate, (message) => {
     res.write(`event: app-update\ndata: ${message}\n\n`);
@@ -42,15 +33,15 @@ export const appUpdatesSSE = async (req, res) => {
 
   req.on("close", async () => {
     clearInterval(heartbeat);
-    await sub.unsubscribe(CHANNELS.appUpdate);
-    await sub.disconnect();
+    await sub.unsubscribe(CHANNELS.appUpdate).catch(() => null);
+    await sub.disconnect().catch(() => null);
   });
 };
 
 // ── Marketer stats SSE (/updates/marketer/:id) ─────────────────────────────
 // Marketer dashboard connects and receives live commission updates.
 export const marketerStatsSSE = async (req, res) => {
-  const { marketerId } = req.marketer; // injected by authenticateMarketer middleware
+  const { marketerId } = req.marketer;
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-store, no-transform");
@@ -62,9 +53,13 @@ export const marketerStatsSSE = async (req, res) => {
 
   const sub = await createSubscriberClient();
 
+  if (!sub) {
+    req.on("close", () => clearInterval(heartbeat));
+    return;
+  }
+
   await sub.subscribe(CHANNELS.statsUpdate, (message) => {
     const data = JSON.parse(message);
-    // Only forward if this update is for the connected marketer
     if (String(data.marketerId) === String(marketerId)) {
       res.write(`event: stats-update\ndata: ${message}\n\n`);
     }
@@ -72,8 +67,8 @@ export const marketerStatsSSE = async (req, res) => {
 
   req.on("close", async () => {
     clearInterval(heartbeat);
-    await sub.unsubscribe(CHANNELS.statsUpdate);
-    await sub.disconnect();
+    await sub.unsubscribe(CHANNELS.statsUpdate).catch(() => null);
+    await sub.disconnect().catch(() => null);
   });
 };
 

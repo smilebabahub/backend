@@ -1,217 +1,185 @@
-import Product from "../models/Product.js";
+// e.g. import Listing from "../models/listing.js";
+// e.g. import Product from "../models/product.js";
+// For now using Ad model as the unified listing model
+import Ad from "../models/adModel.js";
 
-//Create add products here: only suscribed venodrs are eligible
-export const createProduct = async (req, res) => {
+// ── GET /products — public feed ────────────────────────────────────────────
+// Frontend: fetchProducts({ category, country, featured, search, sort, page, limit })
+// Response: { products: Product[], meta: { total, page, limit, totalPages, hasNext } }
+export const getProducts = async (req, res) => {
   try {
     const {
-      title,
       category,
-      subcategory,
-      type,
-      name,
-      description,
-      price,
-      stock,
-      region,
-      city,
-      phone,
-    } = req.body;
+      sub,
+      country,
+      search,
+      featured,
+      minPrice,
+      maxPrice,
+      currency,
+      sort = "newest",
+      page = 1,
+      limit = 20,
+    } = req.query;
 
-    const existing = await Product.findOne({
-      title: req.body.title,
-      user: req.user.userId,
-      createdAt: { $gte: new Date(Date.now() - 10000) },
-    });
+    const filter = {
+      isActive: true,
+      isSold: false,
+      isPaused: false,
+      "moderation.status": "approved",
+    };
 
-    if (existing) {
-      return res.status(409).json({ message: "Duplicate product detected" });
+    if (country) filter["location.country"] = country;
+    if (category) filter["category.main"] = category;
+    if (sub) filter["category.sub"] = sub;
+    if (featured === "true") filter.isFeatured = true;
+    if (search) filter.$text = { $search: search };
+    if (minPrice || maxPrice) {
+      filter["price.amount"] = {};
+      if (minPrice) filter["price.amount"].$gte = Number(minPrice);
+      if (maxPrice) filter["price.amount"].$lte = Number(maxPrice);
     }
+    if (currency) filter["price.currency"] = currency;
 
-    if (
-      !title ||
-      !category ||
-      !subcategory ||
-      !type ||
-      !description ||
-      !region ||
-      !city ||
-      !price ||
-      !name ||
-      !phone
-    ) {
-      return res.status(400).json({
-        message: "All required fields must be filled",
-      });
-    }
+    const sortMap = {
+      newest: { "boost.isBoosted": -1, createdAt: -1 },
+      oldest: { createdAt: 1 },
+      price_asc: { "price.amount": 1 },
+      price_desc: { "price.amount": -1 },
+      popular: { views: -1 },
+    };
 
-    if (!req.processedImages || req.processedImages.length === 0) {
-      return res.status(400).json({
-        message: "Please upload at least one image",
-      });
-    }
-
-    const images = req.processedImages.map((url, index) => ({
-      url,
-      isCover: index === 0,
-    }));
-
-    const product = await Product.create({
-      title,
-      category,
-      subcategory,
-      type,
-      region,
-      city,
-      phone,
-      name,
-      description,
-      price,
-      stock,
-      images,
-      vendor: req.user.userId,
-    });
-
-    res.status(201).json({
-      message: "Product created successfully",
-      product,
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({
-      message: "Server error",
-    });
-  }
-};
-
-
-
-export const getAllProducts = async (req, res) => {
-  try {
-    const page = Number(req.query.page) || 1;
-    const limit = Number(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
-
-    const keyword = req.query.search
-      ? {
-          name: { $regex: req.query.search, $options: "i" },
-        }
-      : {};
-
-    const products = await Product.find({ ...keyword })
-      .populate("vendor", "username email role") // safe fields only
-      .sort({ createdAt: -1 })
+    const skip = (Number(page) - 1) * Number(limit);
+    const total = await Ad.countDocuments(filter);
+    const docs = await Ad.find(filter)
+      .sort(sortMap[sort] ?? sortMap.newest)
       .skip(skip)
-      .limit(limit);
+      .limit(Number(limit))
+      .populate("postedBy", "username profilePicture phone")
+      .lean();
 
-    const total = await Product.countDocuments({ ...keyword });
+    // Normalise to the Product shape the frontend expects
+    const products = docs.map(normaliseProduct);
 
     res.status(200).json({
-      total,
-      page,
-      pages: Math.ceil(total / limit),
       products,
+      meta: {
+        total,
+        page: Number(page),
+        limit: Number(limit),
+        totalPages: Math.ceil(total / Number(limit)),
+        hasNext: skip + docs.length < total,
+      },
     });
   } catch (error) {
-    res.status(500).json({ message: "Server error" });
+    console.error("getProducts error:", error);
+    res.status(500).json({ message: "Failed to fetch products" });
   }
 };
 
-
-
-export const getSingleProduct = async (req, res) => {
+// ── GET /products/my — vendor's own listings ───────────────────────────────
+// Response: { products: Product[], meta: {...} }
+export const getMyProducts = async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id).populate(
-      "vendor",
-      "username email role",
-    );
+    const userId = req.user.userId;
+    const { page = 1, limit = 20 } = req.query;
 
-    if (!product) {
-      return res.status(404).json({
-        message: "Product not found",
-      });
-    }
+    const skip = (Number(page) - 1) * Number(limit);
+    const total = await Ad.countDocuments({ postedBy: userId });
+    const docs = await Ad.find({ postedBy: userId })
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(Number(limit))
+      .lean();
 
-    res.status(200).json(product);
-  } catch (error) {
-    res.status(500).json({ message: "Server error" });
-  }
-};
-
-
-
-export const updateProduct = async (req, res) => {
-  try {
-    const product = await Product.findById(req.params.id);
-
-    if (!product) {
-      return res.status(404).json({
-        message: "Product not found",
-      });
-    }
-
-    const isOwner = product.vendor.toString() === req.user.userId;
-    const isAdmin = req.user.role === "admin";
-    const isSubscribedVendor =
-      req.user.role === "vendor" && req.user.isSubscribed;
-
-    if (!(isAdmin || (isOwner && isSubscribedVendor))) {
-      return res.status(403).json({
-        message: "Not authorized to update this product",
-      });
-    }
-
-    const { name, description, price, stock } = req.body;
-
-    if (name) product.name = name;
-    if (description) product.description = description;
-    if (price) product.price = price;
-    if (stock) product.stock = stock;
-
-    if (req.files && req.files.length > 0) {
-      product.images = req.files.map((file, index) => ({
-        url: `/uploads/${file.filename}`,
-        isCover: index === 0,
-      }));
-    }
-
-    await product.save();
-
-    res.json({
-      message: "Product updated successfully",
-      product,
+    res.status(200).json({
+      products: docs.map(normaliseProduct),
+      meta: {
+        total,
+        page: Number(page),
+        limit: Number(limit),
+        totalPages: Math.ceil(total / Number(limit)),
+        hasNext: skip + docs.length < total,
+      },
     });
   } catch (error) {
-    res.status(500).json({ message: "Server error" });
+    console.error("getMyProducts error:", error);
+    res.status(500).json({ message: "Failed to fetch your products" });
   }
 };
 
-export const deleteProduct = async (req, res) => {
+// ── GET /products/:id ──────────────────────────────────────────────────────
+// Response: { product: Product }
+export const getProductById = async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id);
+    const doc = await Ad.findById(req.params.id)
+      .populate("postedBy", "username profilePicture phone")
+      .lean();
 
-    if (!product) {
-      return res.status(404).json({
-        message: "Product not found",
-      });
-    }
+    if (!doc) return res.status(404).json({ message: "Product not found" });
 
-    const isOwner = product.vendor.toString() === req.user.userId;
-    const isAdmin = req.user.role === "admin";
-    const isSubscribedVendor =
-      req.user.role === "vendor" && req.user.isSubscribed;
+    // Increment views
+    Ad.findByIdAndUpdate(req.params.id, { $inc: { views: 1 } }).exec();
 
-    if (!(isAdmin || (isOwner && isSubscribedVendor))) {
-      return res.status(403).json({
-        message: "Not authorized to delete this product",
-      });
-    }
-
-    await product.deleteOne();
-
-    res.json({
-      message: "Product deleted successfully",
-    });
+    res.status(200).json({ product: normaliseProduct(doc) });
   } catch (error) {
-    res.status(500).json({ message: "Server error" });
+    res.status(500).json({ message: "Failed to fetch product" });
   }
 };
+
+// ── DELETE /products/:id ───────────────────────────────────────────────────
+export const deleteProductById = async (req, res) => {
+  try {
+    const doc = await Ad.findById(req.params.id);
+    if (!doc) return res.status(404).json({ message: "Product not found" });
+
+    if (String(doc.postedBy) !== req.user.userId && req.user.role !== "admin") {
+      return res.status(403).json({ message: "Not authorised" });
+    }
+
+    await doc.deleteOne();
+    res.status(200).json({ message: "Product deleted" });
+  } catch (error) {
+    res.status(500).json({ message: "Failed to delete product" });
+  }
+};
+
+// ── Normaliser — maps Ad document to the Product shape ─────────────────────
+// Frontend's Product type expects: _id, title, images[], price (number),
+// currency, location, seller, rating, views, isFeatured, createdAt
+function normaliseProduct(doc) {
+  return {
+    _id: doc._id,
+    id: doc._id, // legacy alias
+    title: doc.title,
+    description: doc.description,
+    category: doc.category?.main ?? "",
+    subcategory: doc.category?.sub ?? "",
+    images: (doc.images ?? []).map((img) =>
+      typeof img === "string" ? img : (img.url ?? ""),
+    ),
+    price: doc.price?.amount ?? 0,
+    currency: doc.price?.currency ?? "GHS",
+    priceDisplay: doc.price?.display ?? null,
+    location: {
+      country: doc.location?.country,
+      countryCode: doc.location?.countryCode,
+      region: doc.location?.region,
+      city: doc.location?.city,
+      address: doc.location?.address,
+    },
+    seller: {
+      _id: doc.postedBy?._id ?? doc.postedBy,
+      name: doc.postedBy?.username,
+      username: doc.postedBy?.username,
+      profilePicture: doc.postedBy?.profilePicture,
+      phone: doc.postedBy?.phone,
+    },
+    rating: null, // add your own rating model if needed
+    views: doc.views ?? 0,
+    isFeatured: doc.isFeatured ?? false,
+    isActive: doc.isActive ?? true,
+    createdAt: doc.createdAt,
+    updatedAt: doc.updatedAt,
+  };
+}

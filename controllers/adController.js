@@ -1,8 +1,9 @@
 // controllers/adController.js
 import Ad from "../models/adModel.js";
 import User from "../models/user.js";
+import Notification from "../models/notificationModel.js";
 import { PRICING, PLAN_NAMES } from "../config/pricing.js";
-import { v2 as cloudinary } from "cloudinary";
+import cloudinary, { deleteImages } from "../lib/cloudinary.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -48,10 +49,10 @@ export const createAd = async (req, res) => {
     const ad = await Ad.create({
       title,
       description,
-      slug: null, // generated in pre-save hook
+      slug: null,
       category,
       attributes: attributes ?? [],
-      images:     images ?? [],
+      images:     Array.isArray(images) ? images : [],
       videoUrl:   videoUrl ?? null,
       price: {
         amount:   Number(price.amount),
@@ -62,7 +63,10 @@ export const createAd = async (req, res) => {
       contact,
       delivery:   delivery ?? { available: false, option: "pickup_only" },
       condition:  condition ?? "not_applicable",
-      tags:       tags ?? [],
+      // tags may arrive as string[] or comma-separated string — normalise to array
+      tags: Array.isArray(tags)
+        ? tags
+        : (typeof tags === "string" ? tags.split(",").map((t) => t.trim()).filter(Boolean) : []),
       subscription: {
         plan:        planId,
         package:     planName,
@@ -70,7 +74,7 @@ export const createAd = async (req, res) => {
         expiresAt,
         listingDays: planId === "Basic" ? 3 : 30,
       },
-      moderation: { status: "pending" }, // all ads pending review by default
+      moderation: { status: "pending" },
       postedBy:   userId,
       expiresAt,
     });
@@ -122,7 +126,7 @@ export const getAds = async (req, res) => {
 
     if (minPrice || maxPrice) {
       filter["price.amount"] = {};
-      if (minPrice) (filter["price.amount"] ).$gte = Number(minPrice);
+      if (minPrice) (filter["price.amount"]).$gte = Number(minPrice);
       if (maxPrice) (filter["price.amount"]).$lte = Number(maxPrice);
     }
     if (currency) filter["price.currency"] = currency;
@@ -225,6 +229,14 @@ export const updateAd = async (req, res) => {
       "location", "contact", "delivery", "condition", "tags",
     ];
 
+    // If images are being replaced, delete the old ones from Cloudinary first
+    if (req.body.images && Array.isArray(req.body.images)) {
+      const oldPublicIds = (ad.images ?? [])
+        .map((img) => img.publicId)
+        .filter(Boolean);
+      await deleteImages(oldPublicIds);
+    }
+
     allowed.forEach((field) => {
       if (req.body[field] !== undefined) {
         (ad)[field] = req.body[field];
@@ -259,11 +271,9 @@ export const deleteAd = async (req, res) => {
       return res.status(403).json({ message: "Not authorised to delete this ad" });
     }
 
-    // Delete images from Cloudinary
-    const deletePromises = ad.images
-      .filter((img) => img.publicId)
-      .map((img) => cloudinary.uploader.destroy(img.publicId));
-    await Promise.allSettled(deletePromises);
+    // Delete images from Cloudinary (non-fatal if it fails)
+    const publicIds = ad.images.map((img) => img.publicId).filter(Boolean);
+    await deleteImages(publicIds);
 
     await ad.deleteOne();
 
@@ -447,11 +457,34 @@ export const moderateAd = async (req, res) => {
 
     if (!ad) return res.status(404).json({ message: "Ad not found" });
 
-    res.status(200).json({
-      message: `Ad ${status}`,
-      ad: serializeAd(ad),
-    });
+    // Notify the ad owner
+    const notifType = status === "approved" ? "ad_approved"
+      : status === "rejected" ? "ad_rejected"
+      : "ad_flagged";
+
+    const notifMessages = {
+      approved: `Your ad "${ad.title.slice(0, 50)}" is now live!`,
+      rejected: `Your ad "${ad.title.slice(0, 50)}" was not approved. ${rejectReason ? `Reason: ${rejectReason}` : ""}`,
+      flagged:  `Your ad "${ad.title.slice(0, 50)}" has been flagged for review.`,
+    };
+
+    await Notification.findOneAndUpdate(
+      { dedupeKey: `moderation-${ad._id}-${status}` },
+      {
+        user:       ad.postedBy,
+        type:       notifType,
+        title:      status === "approved" ? "Ad approved ✅" : status === "rejected" ? "Ad not approved ❌" : "Ad flagged ⚠️",
+        message:    notifMessages[status],
+        actionUrl:  `/ads/${ad._id}`,
+        actionLabel:"View ad",
+        dedupeKey:  `moderation-${ad._id}-${status}`,
+      },
+      { upsert: true }
+    );
+
+    res.status(200).json({ message: `Ad ${status}`, ad: serializeAd(ad) });
   } catch (error) {
+    console.error("moderateAd error:", error);
     res.status(500).json({ message: "Failed to moderate ad" });
   }
 };
@@ -478,7 +511,7 @@ export const getSearchSuggestions = async (req, res) => {
     res.status(200).json({
       suggestions: ads.map((a) => ({
         label:    a.title,
-        category: (a.category )?.main,
+        category: (a.category)?.main,
         slug:     a.slug,
       })),
     });

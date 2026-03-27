@@ -18,27 +18,29 @@ import {
 import { requireVendor } from "../middleware/requireVendo.js";
 import authMiddleware from "../middleware/authMiddleWare.js";
 
-const adRoute = express.Router();
+const router = express.Router();
 
 // ── Public routes ──────────────────────────────────────────────────────────
-adRoute.get("/", getAds); // GET  /ads
-adRoute.get("/suggestions", getSearchSuggestions); // GET  /ads/suggestions?q=
-adRoute.get("/slug/:slug", getAdBySlug); // GET  /ads/slug/:slug
-adRoute.get("/:id", getAdById); // GET  /ads/:id
+router.get("/", getAds); // GET /ads
+router.get("/suggestions", getSearchSuggestions); // GET /ads/suggestions?q=
+router.get("/slug/:slug", getAdBySlug); // GET /ads/slug/:slug
 
-// ── Authenticated routes (any logged-in user) ──────────────────────────────
-adRoute.post("/:id/contact-click", authMiddleware, recordContactClick); // POST /ads/:id/contact-click
+// ── Vendor-only — must come BEFORE /:id or Express reads "my" as the id ───
+router.get("/my", authMiddleware, requireVendor, getMyAds); // GET    /ads/my
+router.post("/", authMiddleware, requireVendor, createAd); // POST   /ads
+router.post("/:id/boost", authMiddleware, requireVendor, boostAd); // POST   /ads/:id/boost
+router.patch("/:id/sold", authMiddleware, requireVendor, markAsSold); // PATCH  /ads/:id/sold
+router.patch("/:id/pause", authMiddleware, requireVendor, togglePause); // PATCH  /ads/:id/pause
 
-// ── Vendor-only routes ─────────────────────────────────────────────────────
-adRoute.get("/my", authMiddleware, requireVendor, getMyAds); // GET   /ads/my
-adRoute.post("/", authMiddleware, requireVendor, createAd); // POST  /ads
-adRoute.patch("/:id", authMiddleware, updateAd); // PATCH /ads/:id  (owner or admin)
-adRoute.delete("/:id", authMiddleware, deleteAd); // DELETE /ads/:id (owner or admin)
-adRoute.post("/:id/boost", authMiddleware, requireVendor, boostAd); // POST  /ads/:id/boost
-adRoute.patch("/:id/sold", authMiddleware, requireVendor, markAsSold); // PATCH /ads/:id/sold
-adRoute.patch("/:id/pause", authMiddleware, requireVendor, togglePause); // PATCH /ads/:id/pause
+// ── Dynamic :id routes ─────────────────────────────────────────────────────
+router.get("/:id", getAdById); // GET    /ads/:id
+router.patch("/:id", authMiddleware, updateAd); // PATCH  /ads/:id
+router.delete("/:id", authMiddleware, deleteAd); // DELETE /ads/:id
 
-// ── Admin-only routes ──────────────────────────────────────────────────────
-adRoute.patch("/:id/moderate", authMiddleware, moderateAd); // PATCH /ads/:id/moderate
+// ── Authenticated (any logged-in user) ─────────────────────────────────────
+router.post("/:id/contact-click", authMiddleware, recordContactClick); // POST /ads/:id/contact-click
 
-export default adRoute;
+// ── Admin only ─────────────────────────────────────────────────────────────
+router.patch("/:id/moderate", authMiddleware, moderateAd); // PATCH /ads/:id/moderate
+
+export default router;
