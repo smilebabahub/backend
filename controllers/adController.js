@@ -46,6 +46,8 @@ export const createAd = async (req, res) => {
       condition, tags, videoUrl,
     } = req.body;
 
+    const isDev = process.env.NODE_ENV !== "production";
+
     const ad = await Ad.create({
       title,
       description,
@@ -63,7 +65,6 @@ export const createAd = async (req, res) => {
       contact,
       delivery:   delivery ?? { available: false, option: "pickup_only" },
       condition:  condition ?? "not_applicable",
-      // tags may arrive as string[] or comma-separated string — normalise to array
       tags: Array.isArray(tags)
         ? tags
         : (typeof tags === "string" ? tags.split(",").map((t) => t.trim()).filter(Boolean) : []),
@@ -74,8 +75,13 @@ export const createAd = async (req, res) => {
         expiresAt,
         listingDays: planId === "Basic" ? 3 : 30,
       },
-      moderation: { status: "pending" },
-      postedBy:   userId,
+      // In dev: auto-approve so ads show immediately without an admin step.
+      // In production: all ads start as "pending" and need admin approval.
+      moderation: {
+        status: isDev ? "approved" : "pending",
+      },
+      isActive:  isDev, // active immediately in dev
+      postedBy:  userId,
       expiresAt,
     });
 
@@ -104,16 +110,23 @@ export const getAds = async (req, res) => {
       page = 1, limit = 20,
     } = req.query;
 
+    const isDev = process.env.NODE_ENV !== "production";
+
     const filter = {
-      isActive:           true,
-      isSold:             false,
-      isPaused:           false,
-      "moderation.status": "approved",
+      isSold:   false,
+      isPaused: false,
       $or: [
         { expiresAt: { $gt: new Date() } },
         { expiresAt: null },
       ],
     };
+
+    // In production: only show approved ads and active listings.
+    // In development: show all ads so you can see newly posted ads immediately.
+    if (!isDev) {
+      filter.isActive           = true;
+      filter["moderation.status"] = "approved";
+    }
 
     if (country)   filter["location.country"]  = country;
     if (region)    filter["location.region"]   = { $regex: region, $options: "i" };
@@ -177,10 +190,16 @@ export const getAds = async (req, res) => {
 // GET /ads/:id
 export const getAdById = async (req, res) => {
   try {
+    const isDev = process.env.NODE_ENV !== "production";
     const ad = await Ad.findById(req.params.id)
       .populate("postedBy", "username profilePicture phone");
 
-    if (!ad || !ad.isActive) {
+    if (!ad) {
+      return res.status(404).json({ message: "Ad not found" });
+    }
+
+    // In production, hide inactive/unapproved ads from the public
+    if (!isDev && (!ad.isActive || ad.moderation?.status === "rejected")) {
       return res.status(404).json({ message: "Ad not found" });
     }
 
@@ -297,7 +316,7 @@ export const boostAd = async (req, res) => {
 
     const { tier = "standard" } = req.body;
     const boostDays = { standard: 7, featured: 14, premium: 30 };
-    const days      = boostDays[tier] ?? 7;
+    const days      = boostDays[tier ] ?? 7;
 
     await Ad.findByIdAndUpdate(req.params.id, {
       "boost.isBoosted":    true,

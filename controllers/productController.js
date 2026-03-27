@@ -1,3 +1,8 @@
+// controllers/productController.js
+// Stub controller — replace the model import with your actual product/listing model.
+// The response shapes here MUST match what productsActions.ts expects.
+
+// ── Replace this import with your actual product model ─────────────────────
 // e.g. import Listing from "../models/listing.js";
 // e.g. import Product from "../models/product.js";
 // For now using Ad model as the unified listing model
@@ -9,31 +14,28 @@ import Ad from "../models/adModel.js";
 export const getProducts = async (req, res) => {
   try {
     const {
-      category,
-      sub,
-      country,
-      search,
-      featured,
-      minPrice,
-      maxPrice,
-      currency,
-      sort = "newest",
-      page = 1,
-      limit = 20,
+      category, sub, country, search,
+      featured, minPrice, maxPrice, currency,
+      sort = "newest", page = 1, limit = 20,
     } = req.query;
 
+    const isDev = process.env.NODE_ENV !== "production";
+
     const filter = {
-      isActive: true,
-      isSold: false,
+      isSold:   false,
       isPaused: false,
-      "moderation.status": "approved",
     };
 
-    if (country) filter["location.country"] = country;
-    if (category) filter["category.main"] = category;
-    if (sub) filter["category.sub"] = sub;
-    if (featured === "true") filter.isFeatured = true;
-    if (search) filter.$text = { $search: search };
+    if (!isDev) {
+      filter.isActive            = true;
+      filter["moderation.status"] = "approved";
+    }
+
+    if (country)              filter["location.country"]  = country;
+    if (category)             filter["category.main"]     = category;
+    if (sub)                  filter["category.sub"]      = sub;
+    if (featured === "true")  filter.isFeatured           = true;
+    if (search)               filter.$text                = { $search: search };
     if (minPrice || maxPrice) {
       filter["price.amount"] = {};
       if (minPrice) filter["price.amount"].$gte = Number(minPrice);
@@ -42,16 +44,16 @@ export const getProducts = async (req, res) => {
     if (currency) filter["price.currency"] = currency;
 
     const sortMap = {
-      newest: { "boost.isBoosted": -1, createdAt: -1 },
-      oldest: { createdAt: 1 },
-      price_asc: { "price.amount": 1 },
+      newest:     { "boost.isBoosted": -1, createdAt: -1 },
+      oldest:     { createdAt: 1 },
+      price_asc:  { "price.amount": 1 },
       price_desc: { "price.amount": -1 },
-      popular: { views: -1 },
+      popular:    { views: -1 },
     };
 
-    const skip = (Number(page) - 1) * Number(limit);
+    const skip  = (Number(page) - 1) * Number(limit);
     const total = await Ad.countDocuments(filter);
-    const docs = await Ad.find(filter)
+    const docs  = await Ad.find(filter)
       .sort(sortMap[sort] ?? sortMap.newest)
       .skip(skip)
       .limit(Number(limit))
@@ -65,10 +67,10 @@ export const getProducts = async (req, res) => {
       products,
       meta: {
         total,
-        page: Number(page),
-        limit: Number(limit),
+        page:       Number(page),
+        limit:      Number(limit),
         totalPages: Math.ceil(total / Number(limit)),
-        hasNext: skip + docs.length < total,
+        hasNext:    skip + docs.length < total,
       },
     });
   } catch (error) {
@@ -84,9 +86,9 @@ export const getMyProducts = async (req, res) => {
     const userId = req.user.userId;
     const { page = 1, limit = 20 } = req.query;
 
-    const skip = (Number(page) - 1) * Number(limit);
+    const skip  = (Number(page) - 1) * Number(limit);
     const total = await Ad.countDocuments({ postedBy: userId });
-    const docs = await Ad.find({ postedBy: userId })
+    const docs  = await Ad.find({ postedBy: userId })
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(Number(limit))
@@ -96,10 +98,10 @@ export const getMyProducts = async (req, res) => {
       products: docs.map(normaliseProduct),
       meta: {
         total,
-        page: Number(page),
-        limit: Number(limit),
+        page:       Number(page),
+        limit:      Number(limit),
         totalPages: Math.ceil(total / Number(limit)),
-        hasNext: skip + docs.length < total,
+        hasNext:    skip + docs.length < total,
       },
     });
   } catch (error) {
@@ -149,36 +151,36 @@ export const deleteProductById = async (req, res) => {
 // currency, location, seller, rating, views, isFeatured, createdAt
 function normaliseProduct(doc) {
   return {
-    _id: doc._id,
-    id: doc._id, // legacy alias
-    title: doc.title,
+    _id:         doc._id,
+    id:          doc._id,                            // legacy alias
+    title:       doc.title,
     description: doc.description,
-    category: doc.category?.main ?? "",
-    subcategory: doc.category?.sub ?? "",
+    category:    doc.category?.main ?? "",
+    subcategory: doc.category?.sub  ?? "",
     images: (doc.images ?? []).map((img) =>
-      typeof img === "string" ? img : (img.url ?? ""),
+      typeof img === "string" ? img : img.url ?? ""
     ),
-    price: doc.price?.amount ?? 0,
-    currency: doc.price?.currency ?? "GHS",
-    priceDisplay: doc.price?.display ?? null,
+    price:       doc.price?.amount  ?? 0,
+    currency:    doc.price?.currency ?? "GHS",
+    priceDisplay:doc.price?.display  ?? null,
     location: {
-      country: doc.location?.country,
-      countryCode: doc.location?.countryCode,
-      region: doc.location?.region,
-      city: doc.location?.city,
-      address: doc.location?.address,
+      country:    doc.location?.country,
+      countryCode:doc.location?.countryCode,
+      region:     doc.location?.region,
+      city:       doc.location?.city,
+      address:    doc.location?.address,
     },
     seller: {
-      _id: doc.postedBy?._id ?? doc.postedBy,
-      name: doc.postedBy?.username,
-      username: doc.postedBy?.username,
+      _id:            doc.postedBy?._id ?? doc.postedBy,
+      name:           doc.postedBy?.username,
+      username:       doc.postedBy?.username,
       profilePicture: doc.postedBy?.profilePicture,
-      phone: doc.postedBy?.phone,
+      phone:          doc.postedBy?.phone,
     },
-    rating: null, // add your own rating model if needed
-    views: doc.views ?? 0,
-    isFeatured: doc.isFeatured ?? false,
-    isActive: doc.isActive ?? true,
+    rating:    null,    // add your own rating model if needed
+    views:     doc.views     ?? 0,
+    isFeatured:doc.isFeatured ?? false,
+    isActive:  doc.isActive  ?? true,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   };
