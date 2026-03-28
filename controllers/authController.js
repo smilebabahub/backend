@@ -283,3 +283,71 @@ export const resetPassword = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
+
+
+
+// ── GUEST LOCATION — GET /auth/guest-location ──────────────────────────────
+// Returns country + currency for unauthenticated visitors based on their IP.
+// This proxies Geoapify so the API key is never exposed to the browser.
+// Response is intentionally minimal and requires no auth.
+export const getGuestLocation = async (req, res) => {
+  try {
+    const ip = req.headers["x-forwarded-for"]?.split(",").shift()
+      || req.socket?.remoteAddress
+      || "";
+ 
+    const geo = await getLocationFromIP(ip);
+ 
+    // Map to supported countries — everything else defaults to Ghana
+    let country  = "Ghana";
+    let currency = "GHS";
+    let symbol   = "₵";
+ 
+    if (geo.country?.toLowerCase().includes("nigeria")) {
+      country  = "Nigeria";
+      currency = "NGN";
+      symbol   = "₦";
+    } else if (geo.country?.toLowerCase().includes("ghana")) {
+      country  = "Ghana";
+      currency = "GHS";
+      symbol   = "₵";
+    }
+ 
+    res.json({ country, currency, symbol, detectedFrom: geo.country || "unknown" });
+  } catch (error) {
+    // Always return a valid fallback — never a 500 for guests
+    res.json({ country: "Ghana", currency: "GHS", symbol: "₵", detectedFrom: "fallback" });
+  }
+};
+
+
+
+
+// ── GUEST COUNTRY (/auth/guest-country) ───────────────────────────────────
+// Called by GuestLocationDetector on app mount for unauthenticated visitors.
+// Returns their country + currency from IP — no auth required.
+// Response is intentionally minimal and fast (no DB write).
+export const getGuestCountry = async (req, res) => {
+  try {
+    const ip = req.headers["x-forwarded-for"]?.split(",").shift()
+      || req.socket?.remoteAddress
+      || "";
+ 
+    const geo = await getLocationFromIP(ip);
+    const countryName = geo.country || "Ghana";
+ 
+    // Map country name to currency
+    const c = countryName.toLowerCase();
+    let currency = "GHS";
+    if (c.includes("nigeria")) currency = "NGN";
+ 
+    // Normalise country name to one of our supported values
+    let country = "Ghana";
+    if (c.includes("nigeria")) country = "Nigeria";
+ 
+    res.json({ country, currency });
+  } catch {
+    // Always return a safe default — never error on geo detection
+    res.json({ country: "Ghana", currency: "GHS" });
+  }
+};

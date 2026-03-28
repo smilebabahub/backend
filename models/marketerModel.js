@@ -11,8 +11,8 @@ const commissionSchema = new mongoose.Schema(
     planId: { type: String, required: true },
     billingCycle: { type: String, required: true },
     originalAmount: { type: Number, required: true }, // full price before discount
-    discountAmount: { type: Number, required: true }, // 20% off given to vendor
-    commission: { type: Number, required: true }, // marketer earns 20% of original
+    discountAmount: { type: Number, required: true }, // 15% off given to vendor
+    commission: { type: Number, required: true }, // marketer earns 15% of original
     currency: { type: String, required: true },
     txRef: { type: String, required: true },
     paidOut: { type: Boolean, default: false },
