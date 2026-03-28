@@ -46,7 +46,6 @@ export const createAd = async (req, res) => {
       condition, tags, videoUrl,
     } = req.body;
 
-    const isDev = process.env.NODE_ENV !== "production";
 
     const ad = await Ad.create({
       title,
@@ -75,18 +74,14 @@ export const createAd = async (req, res) => {
         expiresAt,
         listingDays: planId === "Basic" ? 3 : 30,
       },
-      // In dev: auto-approve so ads show immediately without an admin step.
-      // In production: all ads start as "pending" and need admin approval.
-      moderation: {
-        status: isDev ? "approved" : "pending",
-      },
-      isActive:  isDev, // active immediately in dev
-      postedBy:  userId,
+      moderation: { status: "approved" },
+      isActive:   true,
+      postedBy:   userId,
       expiresAt,
     });
 
     res.status(201).json({
-      message: "Ad created successfully and is pending review.",
+      message: "Ad posted successfully.",
       ad: serializeAd(ad),
     });
   } catch (error) {
@@ -110,31 +105,23 @@ export const getAds = async (req, res) => {
       page = 1, limit = 20,
     } = req.query;
 
-    // ── Country is REQUIRED — we never show cross-country ads ─────────────
-    // If no country is sent, return empty rather than leaking all countries.
-    if (!country) {
-      return res.status(200).json({
-        ads: [],
-        meta: { total: 0, page: 1, limit: Number(limit), totalPages: 0, hasNext: false },
-      });
-    }
-
-    const isDev = process.env.NODE_ENV !== "production";
+    // ── Country filter ─────────────────────────────────────────────────────
+    // Default to Ghana if no country sent — always scope to a country.
+    // Frontend always sends country (resolved from user/guest/fallback),
+    // but if somehow it's missing we still return useful results.
+    const resolvedCountry = (country)?.trim() || "Ghana";
 
     const filter = {
-      "location.country": country,   // ← always applied
+      isActive: true,
       isSold:   false,
       isPaused: false,
+      "location.country": resolvedCountry,
       $or: [
         { expiresAt: { $gt: new Date() } },
         { expiresAt: null },
       ],
     };
 
-    if (!isDev) {
-      filter.isActive            = true;
-      filter["moderation.status"] = "approved";
-    }
     if (region)    filter["location.region"]   = { $regex: region, $options: "i" };
     if (city)      filter["location.city"]     = { $regex: city,   $options: "i" };
     if (category)  filter["category.main"]     = category;
@@ -145,8 +132,8 @@ export const getAds = async (req, res) => {
 
     if (minPrice || maxPrice) {
       filter["price.amount"] = {};
-      if (minPrice) (filter["price.amount"]).$gte = Number(minPrice);
-      if (maxPrice) (filter["price.amount"]).$lte = Number(maxPrice);
+      if (minPrice) (filter["price.amount"] ).$gte = Number(minPrice);
+      if (maxPrice) (filter["price.amount"] ).$lte = Number(maxPrice);
     }
     if (currency) filter["price.currency"] = currency;
 
@@ -196,20 +183,13 @@ export const getAds = async (req, res) => {
 // GET /ads/:id
 export const getAdById = async (req, res) => {
   try {
-    const isDev = process.env.NODE_ENV !== "production";
     const ad = await Ad.findById(req.params.id)
       .populate("postedBy", "username profilePicture phone");
 
-    if (!ad) {
+    if (!ad || !ad.isActive) {
       return res.status(404).json({ message: "Ad not found" });
     }
 
-    // In production, hide inactive/unapproved ads from the public
-    if (!isDev && (!ad.isActive || ad.moderation?.status === "rejected")) {
-      return res.status(404).json({ message: "Ad not found" });
-    }
-
-    // Increment view count (fire-and-forget — don't await)
     Ad.findByIdAndUpdate(req.params.id, { $inc: { views: 1 } }).exec();
 
     res.status(200).json({ ad: serializeAd(ad) });
@@ -223,7 +203,7 @@ export const getAdById = async (req, res) => {
 // GET /ads/slug/:slug
 export const getAdBySlug = async (req, res) => {
   try {
-    const ad = await Ad.findOne({ slug: req.params.slug, isActive: true })
+    const ad = await Ad.findOne({ slug: req.params.slug, isActive: true, isSold: false })
       .populate("postedBy", "username profilePicture phone");
 
     if (!ad) return res.status(404).json({ message: "Ad not found" });
@@ -267,11 +247,6 @@ export const updateAd = async (req, res) => {
         (ad)[field] = req.body[field];
       }
     });
-
-    // Re-trigger moderation on significant edits
-    if (req.body.title || req.body.description || req.body.images) {
-      ad.moderation.status = "pending";
-    }
 
     await ad.save();
 
@@ -322,7 +297,7 @@ export const boostAd = async (req, res) => {
 
     const { tier = "standard" } = req.body;
     const boostDays = { standard: 7, featured: 14, premium: 30 };
-    const days      = boostDays[tier ] ?? 7;
+    const days      = boostDays[tier] ?? 7;
 
     await Ad.findByIdAndUpdate(req.params.id, {
       "boost.isBoosted":    true,
@@ -498,7 +473,7 @@ export const moderateAd = async (req, res) => {
       {
         user:       ad.postedBy,
         type:       notifType,
-        title:      status === "approved" ? "Ad approved ✅" : status === "rejected" ? "Ad not approved ❌" : "Ad flagged ⚠️",
+        title:      status === "approved" ? "Ad approved" : status === "rejected" ? "Ad not approved" : "Ad flagged",
         message:    notifMessages[status],
         actionUrl:  `/ads/${ad._id}`,
         actionLabel:"View ad",

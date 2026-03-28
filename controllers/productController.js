@@ -19,26 +19,15 @@ export const getProducts = async (req, res) => {
       sort = "newest", page = 1, limit = 20,
     } = req.query;
 
-    const isDev = process.env.NODE_ENV !== "production";
-
-    // ── Country is REQUIRED ────────────────────────────────────────────────
-    if (!country) {
-      return res.status(200).json({
-        products: [],
-        meta: { total: 0, page: 1, limit: Number(limit), totalPages: 0, hasNext: false },
-      });
-    }
+    // Default to Ghana if no country sent — never return empty to any visitor
+    const resolvedCountry = (country)?.trim() || "Ghana";
 
     const filter = {
-      "location.country": country,   // ← always applied
+      "location.country": resolvedCountry,
+      isActive: true,
       isSold:   false,
       isPaused: false,
     };
-
-    if (!isDev) {
-      filter.isActive            = true;
-      filter["moderation.status"] = "approved";
-    }
 
     if (category)             filter["category.main"]     = category;
     if (sub)                  filter["category.sub"]      = sub;
