@@ -10,8 +10,9 @@ import {
   verifyWebhookSignature,
 } from "../lib/paymentGateway.js";
 import { publish, CHANNELS } from "../lib/redis.js";
+import { sendSubscriptionEmails } from "../lib/emailService.js";
 
-const REFERRAL_DISCOUNT = 0.2;
+const REFERRAL_DISCOUNT = 0.15;
 
 function applyDiscount(amount, hasReferral) {
   if (!hasReferral || amount === 0) return amount;
@@ -72,7 +73,7 @@ async function activateSubscription({
     {
       user: userId,
       type: "subscription_activated",
-      title: "Subscription activated 🎉",
+      title: "Subscription activated",
       message: `Your ${title} is now active. You can post listings and boost products.`,
       actionUrl: "/vendor/dashboard",
       actionLabel: "Go to dashboard",
@@ -116,7 +117,7 @@ async function activateSubscription({
     await Notification.create({
       user: marketerId,
       type: "boost_approved",
-      title: "New referral commission 💰",
+      title: "New referral commission",
       message: `You earned ${payment.currency} ${commission} from a ${title} referral.`,
       actionUrl: "/marketer/dashboard",
       actionLabel: "View earnings",
@@ -124,6 +125,32 @@ async function activateSubscription({
   }
 
   return expiresAt;
+}
+
+// Fire subscription emails after activation — looks up user for email/username
+async function sendSubEmailsForUser({
+  userId,
+  planId,
+  billingCycle,
+  payment,
+  expiresAt,
+}) {
+  try {
+    const user = await User.findById(userId).select("email username").lean();
+    if (!user) return;
+    const title = `${PLAN_NAMES[planId] ?? planId} ${billingCycle === "monthly" ? "Monthly" : "Yearly"} Plan`;
+    await sendSubscriptionEmails({
+      username: user.username,
+      email: user.email,
+      planTitle: title,
+      billingCycle,
+      amount: payment.amount,
+      currency: payment.currency,
+      expiresAt,
+    });
+  } catch (e) {
+    console.error("[paymentController] subscription email error:", e.message);
+  }
 }
 
 export const checkReferralCode = async (req, res) => {
@@ -287,6 +314,16 @@ export const verifyPayment = async (req, res) => {
       txRef: payment.tx_ref,
       marketerId: marketerId || null,
     });
+
+    // Fire email (non-blocking)
+    sendSubEmailsForUser({
+      userId,
+      planId,
+      billingCycle,
+      payment,
+      expiresAt: undefined,
+    }).catch(() => {});
+
     const destination = returnUrl
       ? decodeURIComponent(returnUrl)
       : "/vendor/dashboard";
@@ -335,6 +372,13 @@ export const paymentWebhook = async (req, res) => {
         txRef: payment.tx_ref ?? payment.reference,
         marketerId: marketerId || null,
       });
+      // Fire email (non-blocking)
+      sendSubEmailsForUser({
+        userId,
+        planId,
+        billingCycle,
+        payment: { ...payment, amount },
+      }).catch(() => {});
     }
     res.status(200).end();
   } catch (error) {

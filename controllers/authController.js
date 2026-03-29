@@ -3,13 +3,24 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import nodemailer from "nodemailer";
+import { sendRegistrationEmails } from "../lib/emailService.js";
 import {
   generateAccessToken,
   generateRefreshToken,
 } from "../utils/generateTokens.js";
-import { getCurrencyFromCountry } from "../activities/getCurrencyHelper.js";
-import { getLocationFromIP } from "../activities/getLocation.js";
+import axios from "axios";
 
+// ── Currency helper ────────────────────────────────────────────────────────
+// Extend this map as you expand to more countries
+const getCurrencyFromCountry = (country = "") => {
+  const c = country.toLowerCase();
+  if (c.includes("ghana"))
+    return { currency: "GHS", symbol: "₵", locale: "en-GH" };
+  if (c.includes("nigeria"))
+    return { currency: "NGN", symbol: "₦", locale: "en-NG" };
+  // Default fallback
+  return { currency: "GHS", symbol: "₵", locale: "en-GH" };
+};
 
 // ── Shared user serializer ─────────────────────────────────────────────────
 // Single place that decides what fields go to the frontend — keeps login,
@@ -32,13 +43,29 @@ const serializeUser = (user) => {
     subscription: user.subscription ?? null,
     // ── Geo / currency ──
     country,
-    currency, 
-    symbol, 
-    locale,
+    currency, // "GHS" | "NGN"
+    symbol, // "₵"   | "₦"
+    locale, // "en-GH" | "en-NG"
   };
 };
 
-
+// ── IP → Geolocation ───────────────────────────────────────────────────────
+const getLocationFromIP = async (ip) => {
+  try {
+    const response = await axios.get(
+      `https://api.geoapify.com/v1/ipinfo?ip=${ip}&apiKey=${process.env.GEOAPIFY_API_KEY}`,
+    );
+    return {
+      country: response.data.country?.name || "",
+      city: response.data.city?.name || "",
+      location:
+        `${response.data.city?.name}, ${response.data.country?.name}` || "",
+    };
+  } catch (error) {
+    console.log("Geoapify error:", error.message);
+    return { country: "", city: "", location: "" };
+  }
+};
 
 // ── Cookie options helper ──────────────────────────────────────────────────
 const cookieOptions = () => {
@@ -50,7 +77,6 @@ const cookieOptions = () => {
     path: "/",
   };
 };
-
 
 // ── REGISTER ───────────────────────────────────────────────────────────────
 export const register = async (req, res) => {
@@ -87,6 +113,14 @@ export const register = async (req, res) => {
       message: "Registration successful",
       user: serializeUser(user),
     });
+
+    // Send welcome emails (fire-and-forget — never blocks the response)
+    sendRegistrationEmails({
+      username: user.username,
+      email: user.email,
+      country: geoData.country,
+      city: geoData.city,
+    }).catch((e) => console.error("[register] email error:", e.message));
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -138,7 +172,6 @@ export const login = async (req, res) => {
       ...opts,
       maxAge: 24 * 60 * 60 * 1000,
     });
-
     res.cookie("refreshToken", refreshToken, {
       ...opts,
       maxAge: 7 * 24 * 60 * 60 * 1000,
@@ -155,9 +188,7 @@ export const login = async (req, res) => {
   }
 };
 
-
-
-// ── GET CURRENT USER (/auth/me) 
+// ── GET CURRENT USER (/auth/me) ────────────────────────────────────────────
 // Called by restoreSession after refresh — must return same shape as login
 export const getCurrentUser = async (req, res) => {
   try {
@@ -170,8 +201,6 @@ export const getCurrentUser = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
-
-
 
 // ── REFRESH TOKEN ──────────────────────────────────────────────────────────
 export const refresh = async (req, res) => {
@@ -199,8 +228,6 @@ export const refresh = async (req, res) => {
   }
 };
 
-
-
 // ── LOGOUT ─────────────────────────────────────────────────────────────────
 export const logout = async (req, res) => {
   try {
@@ -212,8 +239,6 @@ export const logout = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
-
-
 
 // ── FORGOT PASSWORD ────────────────────────────────────────────────────────
 export const forgotPassword = async (req, res) => {
@@ -284,44 +309,50 @@ export const resetPassword = async (req, res) => {
   }
 };
 
-
-
 // ── GUEST LOCATION — GET /auth/guest-location ──────────────────────────────
 // Returns country + currency for unauthenticated visitors based on their IP.
 // This proxies Geoapify so the API key is never exposed to the browser.
 // Response is intentionally minimal and requires no auth.
 export const getGuestLocation = async (req, res) => {
   try {
-    const ip = req.headers["x-forwarded-for"]?.split(",").shift()
-      || req.socket?.remoteAddress
-      || "";
- 
+    const ip =
+      req.headers["x-forwarded-for"]?.split(",").shift() ||
+      req.socket?.remoteAddress ||
+      "";
+
     const geo = await getLocationFromIP(ip);
- 
+
     // Map to supported countries — everything else defaults to Ghana
-    let country  = "Ghana";
+    let country = "Ghana";
     let currency = "GHS";
-    let symbol   = "₵";
- 
+    let symbol = "₵";
+
     if (geo.country?.toLowerCase().includes("nigeria")) {
-      country  = "Nigeria";
+      country = "Nigeria";
       currency = "NGN";
-      symbol   = "₦";
+      symbol = "₦";
     } else if (geo.country?.toLowerCase().includes("ghana")) {
-      country  = "Ghana";
+      country = "Ghana";
       currency = "GHS";
-      symbol   = "₵";
+      symbol = "₵";
     }
- 
-    res.json({ country, currency, symbol, detectedFrom: geo.country || "unknown" });
+
+    res.json({
+      country,
+      currency,
+      symbol,
+      detectedFrom: geo.country || "unknown",
+    });
   } catch (error) {
     // Always return a valid fallback — never a 500 for guests
-    res.json({ country: "Ghana", currency: "GHS", symbol: "₵", detectedFrom: "fallback" });
+    res.json({
+      country: "Ghana",
+      currency: "GHS",
+      symbol: "₵",
+      detectedFrom: "fallback",
+    });
   }
 };
-
-
-
 
 // ── GUEST COUNTRY (/auth/guest-country) ───────────────────────────────────
 // Called by GuestLocationDetector on app mount for unauthenticated visitors.
@@ -329,22 +360,23 @@ export const getGuestLocation = async (req, res) => {
 // Response is intentionally minimal and fast (no DB write).
 export const getGuestCountry = async (req, res) => {
   try {
-    const ip = req.headers["x-forwarded-for"]?.split(",").shift()
-      || req.socket?.remoteAddress
-      || "";
- 
+    const ip =
+      req.headers["x-forwarded-for"]?.split(",").shift() ||
+      req.socket?.remoteAddress ||
+      "";
+
     const geo = await getLocationFromIP(ip);
     const countryName = geo.country || "Ghana";
- 
+
     // Map country name to currency
     const c = countryName.toLowerCase();
     let currency = "GHS";
     if (c.includes("nigeria")) currency = "NGN";
- 
+
     // Normalise country name to one of our supported values
     let country = "Ghana";
     if (c.includes("nigeria")) country = "Nigeria";
- 
+
     res.json({ country, currency });
   } catch {
     // Always return a safe default — never error on geo detection

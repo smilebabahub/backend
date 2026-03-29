@@ -23,6 +23,7 @@ import {
   verifyGatewayPayment,
   verifyWebhookSignature,
 } from "../lib/paymentGateway.js";
+import { sendBoostEmails } from "../lib/emailService.js";
 
 // ── Activate boost on an ad ────────────────────────────────────────────────
 async function activateAdBoost({ adId, tier, txRef, payment }) {
@@ -37,15 +38,17 @@ async function activateAdBoost({ adId, tier, txRef, payment }) {
     "boost.boostTier": tier,
   });
 
-  // Notify the vendor
-  const ad = await Ad.findById(adId).select("title postedBy");
+  // Notify the vendor + send email
+  const ad = await Ad.findById(adId)
+    .select("title postedBy")
+    .populate("postedBy", "email username");
   if (ad) {
     await Notification.findOneAndUpdate(
       { dedupeKey: `boost-${txRef}` },
       {
-        user: ad.postedBy,
+        user: ad.postedBy._id ?? ad.postedBy,
         type: "boost_approved",
-        title: "Ad boosted successfully 🚀",
+        title: "Ad boosted successfully",
         message: `Your ad "${ad.title}" is now boosted as ${BOOST_TIER_NAMES[tier]} for ${days} days.`,
         actionUrl: `/ads/${adId}`,
         actionLabel: "View your ad",
@@ -53,6 +56,22 @@ async function activateAdBoost({ adId, tier, txRef, payment }) {
       },
       { upsert: true },
     );
+
+    // Fire boost email (non-blocking)
+    const vendor = ad.postedBy;
+    if (vendor?.email) {
+      sendBoostEmails({
+        username: vendor.username,
+        email: vendor.email,
+        adTitle: ad.title,
+        adId: String(adId),
+        tier,
+        tierLabel: BOOST_TIER_NAMES[tier],
+        days,
+        amount: payment.amount,
+        currency: payment.currency,
+      }).catch((e) => console.error("[boost] email error:", e.message));
+    }
   }
 
   return { boostedUntil, days };

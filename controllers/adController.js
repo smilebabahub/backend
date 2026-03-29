@@ -109,7 +109,7 @@ export const getAds = async (req, res) => {
     // Default to Ghana if no country sent — always scope to a country.
     // Frontend always sends country (resolved from user/guest/fallback),
     // but if somehow it's missing we still return useful results.
-    const resolvedCountry = (country)?.trim() || "Ghana";
+    const resolvedCountry = (country )?.trim() || "Ghana";
 
     const filter = {
       isActive: true,
@@ -132,8 +132,8 @@ export const getAds = async (req, res) => {
 
     if (minPrice || maxPrice) {
       filter["price.amount"] = {};
-      if (minPrice) (filter["price.amount"] ).$gte = Number(minPrice);
-      if (maxPrice) (filter["price.amount"] ).$lte = Number(maxPrice);
+      if (minPrice) (filter["price.amount"]).$gte = Number(minPrice);
+      if (maxPrice) (filter["price.amount"]).$lte = Number(maxPrice);
     }
     if (currency) filter["price.currency"] = currency;
 
@@ -244,7 +244,7 @@ export const updateAd = async (req, res) => {
 
     allowed.forEach((field) => {
       if (req.body[field] !== undefined) {
-        (ad)[field] = req.body[field];
+        (ad )[field] = req.body[field];
       }
     });
 
@@ -285,33 +285,42 @@ export const deleteAd = async (req, res) => {
 };
 
 // ── BOOST AD ───────────────────────────────────────────────────────────────
+// ── BOOST AD ──────────────────────────────────────────────────────────────
 // POST /ads/:id/boost
+// Boosting now requires payment. This endpoint redirects the vendor to
+// the payment flow. The actual boost activation happens in adBoostPaymentController
+// after Flutterwave confirms payment.
 export const boostAd = async (req, res) => {
   try {
-    const ad = await Ad.findById(req.params.id);
+    const ad = await Ad.findById(req.params.id).select("title postedBy isActive isSold");
     if (!ad) return res.status(404).json({ message: "Ad not found" });
 
     if (String(ad.postedBy) !== req.user.userId) {
       return res.status(403).json({ message: "Not authorised to boost this ad" });
     }
+    if (!ad.isActive || ad.isSold) {
+      return res.status(400).json({ message: "Cannot boost a sold or inactive ad" });
+    }
 
     const { tier = "standard" } = req.body;
-    const boostDays = { standard: 7, featured: 14, premium: 30 };
-    const days      = boostDays[tier] ?? 7;
+    const validTiers = ["standard", "featured", "premium"];
+    if (!validTiers.includes(tier)) {
+      return res.status(400).json({ message: "Invalid boost tier" });
+    }
 
-    await Ad.findByIdAndUpdate(req.params.id, {
-      "boost.isBoosted":    true,
-      "boost.boostedAt":    new Date(),
-      "boost.boostedUntil": new Date(Date.now() + days * 86400000),
-      "boost.boostTier":    tier,
-    });
-
-    res.status(200).json({
-      message: `Ad boosted for ${days} days (${tier} tier)`,
+    // Return payment instructions — the frontend should use the boost payment route
+    res.status(402).json({
+      requiresPayment: true,
+      message: "Boosting requires payment. Use the boost payment endpoint.",
+      paymentEndpoints: {
+        GHS: `/payments/boost/gh/initialize`,
+        NGN: `/payments/boost/ng/initialize`,
+      },
+      body: { adId: req.params.id, tier },
     });
   } catch (error) {
     console.error("boostAd error:", error);
-    res.status(500).json({ message: "Failed to boost ad" });
+    res.status(500).json({ message: "Failed to process boost request" });
   }
 };
 

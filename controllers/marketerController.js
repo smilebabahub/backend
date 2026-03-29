@@ -2,6 +2,7 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import Marketer from "../models/marketerModel.js";
+import { sendMarketerRegistrationEmails } from "../lib/emailService.js";
 import {
   cacheReferralCode,
   getReferralCode,
@@ -47,6 +48,15 @@ export const registerMarketer = async (req, res) => {
       message: "Marketer registered successfully",
       marketer: serializeMarketer(marketer),
     });
+
+    // Fire welcome email (non-blocking)
+    sendMarketerRegistrationEmails({
+      name: marketer.name,
+      email: marketer.email,
+      referralCode: marketer.referralCode,
+    }).catch((e) =>
+      console.error("[registerMarketer] email error:", e.message),
+    );
   } catch (error) {
     console.error("registerMarketer error:", error);
     res.status(500).json({ message: "Registration failed" });
