@@ -26,6 +26,7 @@ import orderRoutes from "./routes/orderRoute.js";
 import bookingRoutes from "./routes/bookingRoute.js";
 import marketerRoutes, { updatesRouter } from "./routes/marketerRoute.js";
 import adBoostPaymentRoutes from "./routes/adBoostPaymentRoute.js";
+import adminRoutes from "./routes/adminRoutes.js";
 
 import authMiddleware from "./middleware/authMiddleWare.js";
 import { checkReferralCode } from "./controllers/paymentController.js";
@@ -97,6 +98,7 @@ app.use("/smilebaba/updates", updatesRouter);
 app.use("/smilebaba/chat", chatRoute); // ← REST chat API
 app.use("/smilebaba/orders", orderRoutes);
 app.use("/smilebaba/bookings", bookingRoutes);
+app.use("/smilebaba/admin", adminRoutes);
 app.get(
   "/smilebaba/payments/referral/:code",
   authMiddleware,
