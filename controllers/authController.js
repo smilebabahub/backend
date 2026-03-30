@@ -415,7 +415,9 @@ export const getGuestCountry = async (req, res) => {
 // stored in Redux (adminViewCountry).
 export const adminSwitchCountry = async (req, res) => {
   try {
-    const user = await User.findById(req.user.userId);
+    const user = await User.findById(req.user.userId).select(
+      "email role loginHistory",
+    );
     if (!user || !isAdminEmail(user.email)) {
       return res.status(403).json({ message: "Admin access required" });
     }
@@ -428,7 +430,6 @@ export const adminSwitchCountry = async (req, res) => {
         .json({ message: "Country must be 'Ghana' or 'Nigeria'" });
     }
 
-    // Return user serialized with the requested country override
     res.status(200).json({
       user: serializeUser(user, country),
       adminViewCountry: country,
