@@ -25,17 +25,31 @@ const getCurrencyFromCountry = (country = "") => {
 // ── Shared user serializer ─────────────────────────────────────────────────
 // Single place that decides what fields go to the frontend — keeps login,
 // refresh, and /me responses consistent so Redux never gets mismatched shapes
-const serializeUser = (user) => {
+// ── Admin email list ───────────────────────────────────────────────────────
+// Comma-separated in .env: ADMIN_EMAILS=ceo@smilebabahub.com,admin@smilebabahub.com
+const ADMIN_EMAILS = new Set(
+  (process.env.ADMIN_EMAILS ?? "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean),
+);
+
+const isAdminEmail = (email = "") => ADMIN_EMAILS.has(email.toLowerCase());
+
+const serializeUser = (user, overrideCountry) => {
   const lastLogin = user.loginHistory?.[user.loginHistory.length - 1];
-  const country = lastLogin?.country ?? "";
+  // Admins can override their viewed country via the dropdown
+  const country = overrideCountry ?? lastLogin?.country ?? "";
   const { currency, symbol, locale } = getCurrencyFromCountry(country);
+  const admin = isAdminEmail(user.email);
 
   return {
     _id: user._id,
     username: user.username,
     email: user.email,
     phone: user.phone,
-    role: user.role,
+    role: admin ? "admin" : user.role,
+    isAdmin: admin,
     city: user.city,
     state: user.state,
     profilePicture: user.profilePicture,
@@ -43,9 +57,11 @@ const serializeUser = (user) => {
     subscription: user.subscription ?? null,
     // ── Geo / currency ──
     country,
-    currency, // "GHS" | "NGN"
-    symbol, // "₵"   | "₦"
-    locale, // "en-GH" | "en-NG"
+    currency,
+    symbol,
+    locale,
+    // Admins can see both countries — detected country stored separately
+    detectedCountry: lastLogin?.country ?? "",
   };
 };
 
@@ -98,6 +114,7 @@ export const register = async (req, res) => {
       email,
       password: hashedPassword,
       phone,
+      role: isAdminEmail(email) ? "admin" : "guest",
       loginHistory: [
         {
           ip,
@@ -144,6 +161,12 @@ export const login = async (req, res) => {
       req.headers["x-forwarded-for"]?.split(",").shift() ||
       req.socket?.remoteAddress;
     const geoData = await getLocationFromIP(ip);
+
+    // Sync admin role — if email is in ADMIN_EMAILS, always ensure role is "admin"
+    // (handles case where email was added to env after account was created)
+    if (isAdminEmail(user.email) && user.role !== "admin") {
+      await User.updateOne({ _id: user._id }, { role: "admin" });
+    }
 
     // Push new login event — this becomes the "last login" used for currency
     await User.updateOne(
@@ -381,5 +404,37 @@ export const getGuestCountry = async (req, res) => {
   } catch {
     // Always return a safe default — never error on geo detection
     res.json({ country: "Ghana", currency: "GHS" });
+  }
+};
+
+// ── ADMIN: SWITCH COUNTRY VIEW ──────────────────────────────────────────────
+// PATCH /auth/admin/country
+// Admins call this when they toggle the country dropdown.
+// Returns a fresh user object with the selected country/currency applied.
+// The country is NOT persisted to DB — it's a session-level preference
+// stored in Redux (adminViewCountry).
+export const adminSwitchCountry = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId);
+    if (!user || !isAdminEmail(user.email)) {
+      return res.status(403).json({ message: "Admin access required" });
+    }
+
+    const { country } = req.body;
+    const allowed = ["Ghana", "Nigeria"];
+    if (!allowed.includes(country)) {
+      return res
+        .status(400)
+        .json({ message: "Country must be 'Ghana' or 'Nigeria'" });
+    }
+
+    // Return user serialized with the requested country override
+    res.status(200).json({
+      user: serializeUser(user, country),
+      adminViewCountry: country,
+    });
+  } catch (error) {
+    console.error("adminSwitchCountry error:", error);
+    res.status(500).json({ message: "Server error" });
   }
 };

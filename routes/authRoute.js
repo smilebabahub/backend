@@ -8,6 +8,7 @@ import {
   resetPassword,
   getCurrentUser,
   getGuestCountry,
+  adminSwitchCountry,
 } from "../controllers/authController.js";
 import authMiddleware from "../middleware/authMiddleWare.js";
 
@@ -21,6 +22,9 @@ router.get("/me", authMiddleware, getCurrentUser);
 
 // Guest country detection — no auth, called on app mount for unauthenticated visitors
 router.get("/guest-country",      getGuestCountry);
+
+// Admin: switch viewed country (Ghana ↔ Nigeria)
+router.patch("/admin/country",       authMiddleware, adminSwitchCountry);
 
 router.post("/forgot-password", forgotPassword);
 router.post("/reset-password", resetPassword);
