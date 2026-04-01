@@ -99,6 +99,7 @@ const getLocationFromIP = async (ip) => {
   try {
     const response = await axios.get(
       `https://api.geoapify.com/v1/ipinfo?ip=${ip}&apiKey=${process.env.GEOAPIFY_API_KEY}`,
+      { timeout: 4000 }, // 4s max — never block the response waiting for geo
     );
     return {
       country: response.data.country?.name || "",
@@ -408,17 +409,29 @@ export const getGuestCountry = async (req, res) => {
     const ip = resolveClientIP(req);
     const geo = await getLocationFromIP(ip);
 
-    const c = (geo.country ?? "").toLowerCase();
+    // If geo failed (timeout / API down), signal the frontend to NOT cache
+    // the result so it retries on the next page load.
+    if (!geo.country) {
+      return res.json({
+        country: "Ghana",
+        currency: "GHS",
+        symbol: "₵",
+        detectedFrom: "fallback",
+        detected: false, // ← frontend must NOT cache this
+      });
+    }
+
+    const c = geo.country.toLowerCase();
     const country = c.includes("nigeria") ? "Nigeria" : "Ghana";
     const currency = country === "Nigeria" ? "NGN" : "GHS";
     const symbol = currency === "NGN" ? "₦" : "₵";
 
-    // detectedFrom helps debug proxy IP issues without exposing full geo data
     res.json({
       country,
       currency,
       symbol,
-      detectedFrom: geo.country || "unknown",
+      detectedFrom: geo.country,
+      detected: true, // ← frontend can safely cache this
     });
   } catch {
     res.json({
@@ -426,6 +439,7 @@ export const getGuestCountry = async (req, res) => {
       currency: "GHS",
       symbol: "₵",
       detectedFrom: "fallback",
+      detected: false,
     });
   }
 };
