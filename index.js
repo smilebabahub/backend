@@ -33,6 +33,7 @@ import { checkReferralCode } from "./controllers/paymentController.js";
 import { connectRedis } from "./lib/redis.js";
 import { startSubscriptionCron } from "./cron/subscriptionExpiry.js";
 import { registerSocketHandlers } from "./lib/socketHandler.js"; // ← extracted
+import { resolveClientIP } from "./lib/resolveIp.js";
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
 if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
@@ -95,7 +96,7 @@ app.use("/uploads", express.static("uploads"));
 app.set("trust proxy", 2);
 
 // ── Rate limiting ─────────────────────────────────────────────────────────────
-import { resolveClientIP } from "./lib/resolveIp.js";
+
 
 app.use(
   rateLimit({
