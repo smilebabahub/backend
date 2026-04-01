@@ -24,9 +24,9 @@ import paymentRoute from "./routes/paymentRoute.js";
 import chatRoute from "./routes/chatRoute.js";
 import orderRoutes from "./routes/orderRoute.js";
 import bookingRoutes from "./routes/bookingRoute.js";
+import adminRoutes from "./routes/adminRoutes.js";
 import marketerRoutes, { updatesRouter } from "./routes/marketerRoute.js";
 import adBoostPaymentRoutes from "./routes/adBoostPaymentRoute.js";
-import adminRoutes from "./routes/adminRoutes.js";
 
 import authMiddleware from "./middleware/authMiddleWare.js";
 import { checkReferralCode } from "./controllers/paymentController.js";
@@ -84,7 +84,7 @@ app.use(helmet());
 app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(morgan("common"));
 app.use("/uploads", express.static("uploads"));
-app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
+
 // ── Proxy trust ───────────────────────────────────────────────────────────────
 // Stack: User → Cloudflare (1 hop) → Render load balancer (1 hop) → app
 // Setting to 2 means Express trusts exactly 2 proxy hops, not the whole internet.
@@ -93,25 +93,23 @@ app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
 // key generator — it reads CF-Connecting-IP first, which Cloudflare sets and
 // users cannot spoof, so the key is always the real visitor IP.
 app.set("trust proxy", 2);
- 
+
 // ── Rate limiting ─────────────────────────────────────────────────────────────
 import { resolveClientIP } from "./lib/resolveIp.js";
- 
+
 app.use(
   rateLimit({
-    windowMs: 15 * 60 * 1000,   // 15 minutes
-    max:      500,               // requests per window per IP
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 500, // requests per window per IP
     // Use our own IP resolver so rate limiting keys on the real visitor IP,
     // not the Cloudflare or Render proxy IP.
     keyGenerator: (req) => resolveClientIP(req) || req.ip || "unknown",
     // Skip validation warning — we handle proxy trust correctly above.
-    validate:     { trustProxy: false },
+    validate: { trustProxy: false },
     standardHeaders: true,
-    legacyHeaders:   false,
-  })
+    legacyHeaders: false,
+  }),
 );
-
-
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.use("/smilebaba/auth", authRoute);
