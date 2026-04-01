@@ -4,6 +4,7 @@ import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import nodemailer from "nodemailer";
 import { sendRegistrationEmails } from "../lib/emailService.js";
+import { resolveClientIP } from "../lib/resolveIp.js";
 import {
   generateAccessToken,
   generateRefreshToken,
@@ -103,9 +104,7 @@ export const register = async (req, res) => {
       return res.status(400).json({ message: "Required fields missing" });
     }
 
-    const ip =
-      req.headers["x-forwarded-for"]?.split(",").shift() ||
-      req.socket?.remoteAddress;
+    const ip = resolveClientIP(req);
     const geoData = await getLocationFromIP(ip);
     const hashedPassword = await bcrypt.hash(password, 10);
 
@@ -157,9 +156,7 @@ export const login = async (req, res) => {
         .status(400)
         .json({ message: "Incorrect username and password" });
 
-    const ip =
-      req.headers["x-forwarded-for"]?.split(",").shift() ||
-      req.socket?.remoteAddress;
+    const ip = resolveClientIP(req);
     const geoData = await getLocationFromIP(ip);
 
     // Sync admin role — if email is in ADMIN_EMAILS, always ensure role is "admin"
@@ -338,10 +335,7 @@ export const resetPassword = async (req, res) => {
 // Response is intentionally minimal and requires no auth.
 export const getGuestLocation = async (req, res) => {
   try {
-    const ip =
-      req.headers["x-forwarded-for"]?.split(",").shift() ||
-      req.socket?.remoteAddress ||
-      "";
+    const ip = resolveClientIP(req);
 
     const geo = await getLocationFromIP(ip);
 
@@ -383,27 +377,28 @@ export const getGuestLocation = async (req, res) => {
 // Response is intentionally minimal and fast (no DB write).
 export const getGuestCountry = async (req, res) => {
   try {
-    const ip =
-      req.headers["x-forwarded-for"]?.split(",").shift() ||
-      req.socket?.remoteAddress ||
-      "";
-
+    const ip = resolveClientIP(req);
     const geo = await getLocationFromIP(ip);
-    const countryName = geo.country || "Ghana";
 
-    // Map country name to currency
-    const c = countryName.toLowerCase();
-    let currency = "GHS";
-    if (c.includes("nigeria")) currency = "NGN";
+    const c = (geo.country ?? "").toLowerCase();
+    const country = c.includes("nigeria") ? "Nigeria" : "Ghana";
+    const currency = country === "Nigeria" ? "NGN" : "GHS";
+    const symbol = currency === "NGN" ? "₦" : "₵";
 
-    // Normalise country name to one of our supported values
-    let country = "Ghana";
-    if (c.includes("nigeria")) country = "Nigeria";
-
-    res.json({ country, currency });
+    // detectedFrom helps debug proxy IP issues without exposing full geo data
+    res.json({
+      country,
+      currency,
+      symbol,
+      detectedFrom: geo.country || "unknown",
+    });
   } catch {
-    // Always return a safe default — never error on geo detection
-    res.json({ country: "Ghana", currency: "GHS" });
+    res.json({
+      country: "Ghana",
+      currency: "GHS",
+      symbol: "₵",
+      detectedFrom: "fallback",
+    });
   }
 };
 

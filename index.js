@@ -87,6 +87,8 @@ app.use("/uploads", express.static("uploads"));
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
 app.set("trust proxy", 1);
 
+
+
 // ── Routes ────────────────────────────────────────────────────────────────────
 app.use("/smilebaba/auth", authRoute);
 app.use("/smilebaba/ads", adRoute);
