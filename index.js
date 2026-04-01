@@ -113,11 +113,19 @@ function isPublicIP(ip) {
 }
 
 // ── Rate limiting ─────────────────────────────────────────────────────────────
+import { ipKeyGenerator } from "express-rate-limit";
+
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 500,
-    keyGenerator: (req) => resolveClientIP(req) || req.ip || "unknown",
+    // ipKeyGenerator normalises IPv6 addresses so users can't bypass limits
+    // by switching between IPv4 and IPv6 representations of the same address.
+    // We pass it the real visitor IP (from CF-Connecting-IP) not the proxy IP.
+    keyGenerator: (req) => {
+      const ip = resolveClientIP(req) || req.ip || "unknown";
+      return ipKeyGenerator(ip);
+    },
     validate: { trustProxy: false },
     standardHeaders: true,
     legacyHeaders: false,
