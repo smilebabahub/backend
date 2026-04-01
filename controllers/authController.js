@@ -4,6 +4,7 @@ import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import nodemailer from "nodemailer";
 import { sendRegistrationEmails } from "../lib/emailService.js";
+import { blacklistToken } from "../lib/redis.js";
 import {
   generateAccessToken,
   generateRefreshToken,
@@ -281,10 +282,33 @@ export const refresh = async (req, res) => {
 export const logout = async (req, res) => {
   try {
     const opts = cookieOptions();
+
+    // Blacklist the current access token so it can't be reused
+    // even if someone saved it before logout (belt-and-suspenders security)
+    const headerToken = req.headers.authorization?.split(" ")[1];
+    const cookieToken = req.cookies?.accessToken;
+    const token = headerToken ?? cookieToken;
+
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
+        // jti may or may not be present depending on generateAccessToken version
+        // If no jti, use userId+iat as a unique key
+        const key = decoded.jti ?? `${decoded.userId}:${decoded.iat}`;
+        const expiresIn = (decoded.exp ?? 0) - Math.floor(Date.now() / 1000);
+        if (expiresIn > 0) {
+          await blacklistToken(key, expiresIn);
+        }
+      } catch {
+        // Token already expired or invalid — no need to blacklist
+      }
+    }
+
     res.clearCookie("accessToken", opts);
     res.clearCookie("refreshToken", opts);
     res.json({ message: "Logged out successfully" });
   } catch (error) {
+    console.error("logout error:", error);
     res.status(500).json({ message: "Server error" });
   }
 };

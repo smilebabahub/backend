@@ -1,16 +1,10 @@
 // controllers/productController.js
-// Stub controller — replace the model import with your actual product/listing model.
-// The response shapes here MUST match what productsActions.ts expects.
-
-// ── Replace this import with your actual product model ─────────────────────
-// e.g. import Listing from "../models/listing.js";
-// e.g. import Product from "../models/product.js";
-// For now using Ad model as the unified listing model
 import Ad from "../models/adModel.js";
+import {
+  getFeedCache, setFeedCache, feedCacheKey,
+} from "../lib/redis.js";
 
 // ── GET /products — public feed ────────────────────────────────────────────
-// Frontend: fetchProducts({ category, country, featured, search, sort, page, limit })
-// Response: { products: Product[], meta: { total, page, limit, totalPages, hasNext } }
 export const getProducts = async (req, res) => {
   try {
     const {
@@ -19,8 +13,21 @@ export const getProducts = async (req, res) => {
       sort = "newest", page = 1, limit = 20,
     } = req.query;
 
-    // Default to Ghana if no country sent — never return empty to any visitor
-    const resolvedCountry = (country)?.trim() || "Ghana";
+    const resolvedCountry = (country )?.trim() || "Ghana";
+
+    // ── Redis cache — only for simple unconstrained browsing feeds ───────────
+    // Skip cache for search / price-filter / sub-category (too many variants)
+    const isCacheable = !search && !minPrice && !maxPrice && !sub && !featured && !currency;
+    const cKey = isCacheable
+      ? feedCacheKey({ country: resolvedCountry, category: category , sort: sort , page, limit })
+      : null;
+
+    if (cKey) {
+      const cached = await getFeedCache(cKey);
+      if (cached) {
+        return res.status(200).json({ ...cached, fromCache: true });
+      }
+    }
 
     const filter = {
       "location.country": resolvedCountry,
@@ -49,18 +56,18 @@ export const getProducts = async (req, res) => {
     };
 
     const skip  = (Number(page) - 1) * Number(limit);
-    const total = await Ad.countDocuments(filter);
-    const docs  = await Ad.find(filter)
-      .sort(sortMap[sort] ?? sortMap.newest)
-      .skip(skip)
-      .limit(Number(limit))
-      .populate("postedBy", "username profilePicture phone")
-      .lean();
+    const [total, docs] = await Promise.all([
+      Ad.countDocuments(filter),
+      Ad.find(filter)
+        .sort(sortMap[sort] ?? sortMap.newest)
+        .skip(skip)
+        .limit(Number(limit))
+        .populate("postedBy", "username profilePicture phone")
+        .lean(),
+    ]);
 
-    // Normalise to the Product shape the frontend expects
     const products = docs.map(normaliseProduct);
-
-    res.status(200).json({
+    const result = {
       products,
       meta: {
         total,
@@ -69,7 +76,12 @@ export const getProducts = async (req, res) => {
         totalPages: Math.ceil(total / Number(limit)),
         hasNext:    skip + docs.length < total,
       },
-    });
+    };
+
+    // Write to cache (non-blocking — never delay the response)
+    if (cKey) setFeedCache(cKey, result).catch(() => {});
+
+    res.status(200).json(result);
   } catch (error) {
     console.error("getProducts error:", error);
     res.status(500).json({ message: "Failed to fetch products" });

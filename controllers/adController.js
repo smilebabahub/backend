@@ -4,6 +4,7 @@ import User from "../models/user.js";
 import Notification from "../models/notificationModel.js";
 import { PRICING, PLAN_NAMES } from "../config/pricing.js";
 import cloudinary, { deleteImages } from "../lib/cloudinary.js";
+import { bustFeedCache } from "../lib/redis.js";
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -84,6 +85,9 @@ export const createAd = async (req, res) => {
       message: "Ad posted successfully.",
       ad: serializeAd(ad),
     });
+
+    // Bust feed cache for this ad's country so it appears immediately
+    bustFeedCache(ad.location?.country || "Ghana").catch(() => {});
   } catch (error) {
     console.error("createAd error:", error);
     res.status(500).json({ message: "Failed to create ad" });
@@ -109,7 +113,7 @@ export const getAds = async (req, res) => {
     // Default to Ghana if no country sent — always scope to a country.
     // Frontend always sends country (resolved from user/guest/fallback),
     // but if somehow it's missing we still return useful results.
-    const resolvedCountry = (country )?.trim() || "Ghana";
+    const resolvedCountry = (country)?.trim() || "Ghana";
 
     const filter = {
       isActive: true,
@@ -184,7 +188,8 @@ export const getAds = async (req, res) => {
 export const getAdById = async (req, res) => {
   try {
     const ad = await Ad.findById(req.params.id)
-      .populate("postedBy", "username profilePicture phone");
+      .populate("postedBy", "username profilePicture phone")
+      .lean();
 
     if (!ad || !ad.isActive) {
       return res.status(404).json({ message: "Ad not found" });
@@ -204,7 +209,8 @@ export const getAdById = async (req, res) => {
 export const getAdBySlug = async (req, res) => {
   try {
     const ad = await Ad.findOne({ slug: req.params.slug, isActive: true, isSold: false })
-      .populate("postedBy", "username profilePicture phone");
+      .populate("postedBy", "username profilePicture phone")
+      .lean();
 
     if (!ad) return res.status(404).json({ message: "Ad not found" });
 
@@ -278,6 +284,9 @@ export const deleteAd = async (req, res) => {
     await ad.deleteOne();
 
     res.status(200).json({ message: "Ad deleted successfully" });
+
+    // Bust feed cache so deleted ad disappears immediately
+    bustFeedCache(ad.location?.country || "Ghana").catch(() => {});
   } catch (error) {
     console.error("deleteAd error:", error);
     res.status(500).json({ message: "Failed to delete ad" });
@@ -520,7 +529,7 @@ export const getSearchSuggestions = async (req, res) => {
     res.status(200).json({
       suggestions: ads.map((a) => ({
         label:    a.title,
-        category: (a.category)?.main,
+        category: (a.category )?.main,
         slug:     a.slug,
       })),
     });
