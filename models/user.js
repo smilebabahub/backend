@@ -136,4 +136,10 @@ const userSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+// Speeds up daily cron query: User.find({ role: "vendor", "subscription.expiresAt": { $gte, $lt } })
+userSchema.index({ role: 1, "subscription.expiresAt": 1 });
+
+// Speeds up login lookup
+userSchema.index({ email: 1 }, { unique: true });
+
 export default mongoose.model("User", userSchema);

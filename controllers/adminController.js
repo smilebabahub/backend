@@ -1,21 +1,19 @@
 // controllers/adminController.js
-// All admin-only data endpoints.
-// Every route is protected by authenticate + requireAdmin middleware.
-
-import User from "../models/user.js";
+import User     from "../models/user.js";
 import Purchase from "../models/purchaseModel.js";
 import Marketer from "../models/marketerModel.js";
-import Ad from "../models/adModel.js";
+import Ad       from "../models/adModel.js";
+import Stats    from "../models/statsModel.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────
-const parsePage = (q) => Math.max(1, parseInt(q ?? "1", 10));
+const parsePage  = (q) => Math.max(1, parseInt(q ?? "1",  10));
 const parseLimit = (q) => Math.min(100, Math.max(1, parseInt(q ?? "20", 10)));
 
 // ── GET /admin/overview ────────────────────────────────────────────────────
 // Dashboard headline stats
 export const getOverview = async (req, res) => {
   try {
-    const country = req.query.country; // "Ghana" | "Nigeria" | undefined (all)
+    const country = req.query.country;   // "Ghana" | "Nigeria" | undefined (all)
 
     const [
       totalUsers,
@@ -83,19 +81,19 @@ export const getOverview = async (req, res) => {
 // Paginated user list with search + role filter
 export const getUsers = async (req, res) => {
   try {
-    const page = parsePage(req.query.page);
-    const limit = parseLimit(req.query.limit);
-    const skip = (page - 1) * limit;
+    const page   = parsePage(req.query.page);
+    const limit  = parseLimit(req.query.limit);
+    const skip   = (page - 1) * limit;
     const search = req.query.search?.trim();
-    const role = req.query.role; // "guest" | "vendor" | "admin" | undefined
+    const role   = req.query.role;       // "guest" | "vendor" | "admin" | undefined
 
     const filter = {};
     if (role) filter.role = role;
     if (search) {
       filter.$or = [
         { username: { $regex: search, $options: "i" } },
-        { email: { $regex: search, $options: "i" } },
-        { phone: { $regex: search, $options: "i" } },
+        { email:    { $regex: search, $options: "i" } },
+        { phone:    { $regex: search, $options: "i" } },
       ];
     }
 
@@ -122,14 +120,13 @@ export const getUsers = async (req, res) => {
 // ── GET /admin/users/:id ──────────────────────────────────────────────────
 export const getUserDetail = async (req, res) => {
   try {
-    const user = await User.findById(req.params.id).select("-password").lean();
+    const user = await User.findById(req.params.id)
+      .select("-password")
+      .lean();
     if (!user) return res.status(404).json({ message: "User not found" });
 
     // Their purchase history
-    const purchases = await Purchase.find({
-      user: req.params.id,
-      status: "successful",
-    })
+    const purchases = await Purchase.find({ user: req.params.id, status: "successful" })
       .sort({ createdAt: -1 })
       .select("title amount currency createdAt txRef")
       .lean();
@@ -156,9 +153,7 @@ export const setUserRole = async (req, res) => {
       return res.status(400).json({ message: "Invalid role" });
     }
     const user = await User.findByIdAndUpdate(
-      req.params.id,
-      { role },
-      { new: true },
+      req.params.id, { role }, { new: true }
     ).select("-password");
     if (!user) return res.status(404).json({ message: "User not found" });
     res.status(200).json({ message: "Role updated", user });
@@ -171,27 +166,25 @@ export const setUserRole = async (req, res) => {
 // All successful purchases/subscriptions
 export const getSubscriptions = async (req, res) => {
   try {
-    const page = parsePage(req.query.page);
-    const limit = parseLimit(req.query.limit);
-    const skip = (page - 1) * limit;
-    const search = req.query.search?.trim();
-    const currency = req.query.currency; // "GHS" | "NGN"
-    const planId = req.query.planId;
+    const page     = parsePage(req.query.page);
+    const limit    = parseLimit(req.query.limit);
+    const skip     = (page - 1) * limit;
+    const search   = req.query.search?.trim();
+    const currency = req.query.currency;   // "GHS" | "NGN"
+    const planId   = req.query.planId;
 
     const filter = { status: "successful" };
     if (currency) filter.currency = currency;
-    if (planId) filter.planId = planId;
+    if (planId)   filter.planId   = planId;
 
     // If searching, match user first
     if (search) {
       const matchedUsers = await User.find({
         $or: [
           { username: { $regex: search, $options: "i" } },
-          { email: { $regex: search, $options: "i" } },
+          { email:    { $regex: search, $options: "i" } },
         ],
-      })
-        .select("_id")
-        .lean();
+      }).select("_id").lean();
       filter.user = { $in: matchedUsers.map((u) => u._id) };
     }
 
@@ -208,20 +201,18 @@ export const getSubscriptions = async (req, res) => {
     // Revenue summary for the filtered set
     const revenuePipeline = [
       { $match: filter },
-      {
-        $group: {
-          _id: "$currency",
-          total: { $sum: "$amount" },
-          count: { $sum: 1 },
-        },
-      },
+      { $group: {
+        _id:       "$currency",
+        total:     { $sum: "$amount" },
+        count:     { $sum: 1 },
+      }},
     ];
     const revenueByCurrency = await Purchase.aggregate(revenuePipeline);
 
     res.status(200).json({
       purchases,
-      meta: { page, limit, total, pages: Math.ceil(total / limit) },
-      revenue: revenueByCurrency,
+      meta:     { page, limit, total, pages: Math.ceil(total / limit) },
+      revenue:  revenueByCurrency,
     });
   } catch (error) {
     console.error("getSubscriptions error:", error);
@@ -232,16 +223,16 @@ export const getSubscriptions = async (req, res) => {
 // ── GET /admin/marketers ──────────────────────────────────────────────────
 export const getMarketers = async (req, res) => {
   try {
-    const page = parsePage(req.query.page);
-    const limit = parseLimit(req.query.limit);
-    const skip = (page - 1) * limit;
+    const page   = parsePage(req.query.page);
+    const limit  = parseLimit(req.query.limit);
+    const skip   = (page - 1) * limit;
     const search = req.query.search?.trim();
 
     const filter = {};
     if (search) {
       filter.$or = [
-        { name: { $regex: search, $options: "i" } },
-        { email: { $regex: search, $options: "i" } },
+        { name:         { $regex: search, $options: "i" } },
+        { email:        { $regex: search, $options: "i" } },
         { referralCode: { $regex: search, $options: "i" } },
       ];
     }
@@ -258,21 +249,19 @@ export const getMarketers = async (req, res) => {
 
     // Total earnings across all marketers
     const totals = await Marketer.aggregate([
-      {
-        $group: {
-          _id: null,
-          totalEarningsGHS: { $sum: "$totalEarningsGHS" },
-          totalEarningsNGN: { $sum: "$totalEarningsNGN" },
-          pendingGHS: { $sum: "$pendingPayoutGHS" },
-          pendingNGN: { $sum: "$pendingPayoutNGN" },
-          totalReferrals: { $sum: "$totalReferrals" },
-        },
-      },
+      { $group: {
+        _id:              null,
+        totalEarningsGHS: { $sum: "$totalEarningsGHS" },
+        totalEarningsNGN: { $sum: "$totalEarningsNGN" },
+        pendingGHS:       { $sum: "$pendingPayoutGHS" },
+        pendingNGN:       { $sum: "$pendingPayoutNGN" },
+        totalReferrals:   { $sum: "$totalReferrals"   },
+      }},
     ]);
 
     res.status(200).json({
       marketers,
-      meta: { page, limit, total, pages: Math.ceil(total / limit) },
+      meta:   { page, limit, total, pages: Math.ceil(total / limit) },
       totals: totals[0] ?? {},
     });
   } catch (error) {
@@ -285,23 +274,18 @@ export const getMarketers = async (req, res) => {
 // Mark all pending commissions as paid out
 export const markMarketerPaidOut = async (req, res) => {
   try {
-    const { currency } = req.body; // "GHS" | "NGN"
+    const { currency } = req.body;   // "GHS" | "NGN"
     if (!["GHS", "NGN"].includes(currency)) {
       return res.status(400).json({ message: "currency must be GHS or NGN" });
     }
-    const pendingField =
-      currency === "NGN" ? "pendingPayoutNGN" : "pendingPayoutGHS";
+    const pendingField = currency === "NGN" ? "pendingPayoutNGN" : "pendingPayoutGHS";
 
-    await Marketer.findByIdAndUpdate(
-      req.params.id,
-      {
-        [pendingField]: 0,
-        "commissions.$[elem].paidOut": true,
-      },
-      {
-        arrayFilters: [{ "elem.paidOut": false, "elem.currency": currency }],
-      },
-    );
+    await Marketer.findByIdAndUpdate(req.params.id, {
+      [pendingField]:  0,
+      "commissions.$[elem].paidOut": true,
+    }, {
+      arrayFilters: [{ "elem.paidOut": false, "elem.currency": currency }],
+    });
 
     res.status(200).json({ message: "Marked as paid out" });
   } catch (error) {
@@ -312,19 +296,19 @@ export const markMarketerPaidOut = async (req, res) => {
 // ── GET /admin/ads ────────────────────────────────────────────────────────
 export const getAds = async (req, res) => {
   try {
-    const page = parsePage(req.query.page);
-    const limit = parseLimit(req.query.limit);
-    const skip = (page - 1) * limit;
-    const search = req.query.search?.trim();
+    const page     = parsePage(req.query.page);
+    const limit    = parseLimit(req.query.limit);
+    const skip     = (page - 1) * limit;
+    const search   = req.query.search?.trim();
     const category = req.query.category;
-    const boosted = req.query.boosted;
+    const boosted  = req.query.boosted;
 
     const filter = {};
-    if (category) filter["category.main"] = category;
+    if (category)           filter["category.main"] = category;
     if (boosted === "true") filter["boost.isBoosted"] = true;
     if (search) {
       filter.$or = [
-        { title: { $regex: search, $options: "i" } },
+        { title:       { $regex: search, $options: "i" } },
         { description: { $regex: search, $options: "i" } },
       ];
     }
@@ -346,5 +330,90 @@ export const getAds = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch ads" });
+  }
+};
+
+// ── GET /admin/stats/trend ────────────────────────────────────────────────
+// Returns last N days of daily snapshots for trend charts.
+// Used by admin dashboard to show revenue / users / ads over time.
+export const getStatsTrend = async (req, res) => {
+  try {
+    const country = req.query.country ?? "Ghana";
+    const days    = Math.min(90, Math.max(7, parseInt(req.query.days ?? "30", 10)));
+
+    // Build date range
+    const dates = [];
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      dates.push(d.toISOString().split("T")[0]);
+    }
+
+    const snapshots = await Stats.find({
+      country,
+      date: { $in: dates },
+    }).sort({ date: 1 }).lean();
+
+    // Fill gaps with zeros so charts don't skip days
+    const map = Object.fromEntries(snapshots.map((s) => [s.date, s]));
+    const trend = dates.map((date) => map[date] ?? {
+      date,
+      country,
+      newUsers:       0,
+      totalVendors:   0,
+      newAds:         0,
+      revenueGHS:     0,
+      revenueNGN:     0,
+      totalViews:     0,
+      totalContacts:  0,
+    });
+
+    res.status(200).json({ trend, days, country });
+  } catch (error) {
+    console.error("getStatsTrend error:", error);
+    res.status(500).json({ message: "Failed to fetch stats" });
+  }
+};
+
+// ── GET /admin/stats/conversion ───────────────────────────────────────────
+// Top ads by conversion rate (contactClicks / views).
+// Helps admins identify high-performing listings and advise vendors.
+export const getConversionStats = async (req, res) => {
+  try {
+    const country = req.query.country;
+    const limit   = parseLimit(req.query.limit ?? "20");
+
+    const filter = { isActive: true, views: { $gt: 0 } };
+    if (country) filter["location.country"] = country;
+
+    const ads = await Ad.find(filter)
+      .select("title category price views contactClicks postedBy boost location")
+      .populate("postedBy", "username")
+      .sort({ views: -1 })
+      .limit(limit * 5)    // fetch more then sort in-memory for accuracy
+      .lean();
+
+    // Compute conversion rate and sort
+    const withRate = ads
+      .map((ad) => ({
+        _id:            ad._id,
+        title:          ad.title,
+        category:       ad.category?.main,
+        country:        ad.location?.country,
+        vendor:         (ad.postedBy )?.username ?? "—",
+        views:          ad.views ?? 0,
+        contacts:       ad.contactClicks ?? 0,
+        conversionRate: ad.views > 0
+          ? +((ad.contactClicks / ad.views) * 100).toFixed(1)
+          : 0,
+        isBoosted:      ad.boost?.isBoosted ?? false,
+      }))
+      .sort((a, b) => b.conversionRate - a.conversionRate)
+      .slice(0, limit);
+
+    res.status(200).json({ ads: withRate });
+  } catch (error) {
+    console.error("getConversionStats error:", error);
+    res.status(500).json({ message: "Failed to fetch conversion stats" });
   }
 };
