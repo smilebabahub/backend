@@ -11,10 +11,15 @@ import {
 } from "../utils/generateTokens.js";
 import axios from "axios";
 
-// ── Real IP resolution ─────────────────────────────────────────────────────
-// Reads CF-Connecting-IP first (set by Cloudflare, cannot be spoofed),
-// then falls through X-Real-IP → X-Forwarded-For → socket.
-// Inlined here to avoid a missing-module deploy error.
+// ── Real IP + Country resolution ───────────────────────────────────────────
+// Cloudflare sets two headers we can use directly — no Geoapify call needed:
+//   cf-connecting-ip  → the real visitor IP
+//   cf-ipcountry      → 2-letter ISO country code (e.g. "NG", "GH", "US")
+//
+// cf-ipcountry is FREE on all Cloudflare plans and is always accurate.
+// Using it eliminates the Geoapify dependency for country detection entirely.
+// Geoapify is still used for city/location details at registration/login.
+
 function resolveClientIP(req) {
   const cf = req.headers["cf-connecting-ip"];
   if (cf && isPublicIP(cf)) return cf.trim();
@@ -29,6 +34,32 @@ function resolveClientIP(req) {
   }
 
   return req.socket?.remoteAddress ?? "";
+}
+
+// Resolve country directly from Cloudflare's cf-ipcountry header.
+// Returns { country, currency, symbol } — no external API call, instant.
+function resolveCountryFromCF(req) {
+  const code = (req.headers["cf-ipcountry"] ?? "").toUpperCase().trim();
+
+  // Map ISO country codes to our supported markets
+  const countryMap = {
+    NG: { country: "Nigeria", currency: "NGN", symbol: "₦" },
+    GH: { country: "Ghana", currency: "GHS", symbol: "₵" },
+  };
+
+  if (countryMap[code]) {
+    return { ...countryMap[code], detected: true, detectedFrom: `cf:${code}` };
+  }
+
+  // Unknown country (not NG or GH) — default to Ghana
+  // detected: false so frontend doesn't cache this as confirmed
+  return {
+    country: "Ghana",
+    currency: "GHS",
+    symbol: "₵",
+    detected: false,
+    detectedFrom: code || "unknown",
+  };
 }
 
 function isPublicIP(ip) {
@@ -66,12 +97,23 @@ const ADMIN_EMAILS = new Set(
 
 const isAdminEmail = (email = "") => ADMIN_EMAILS.has(email.toLowerCase());
 
-const serializeUser = (user, overrideCountry) => {
+// serializeUser — builds the user object sent to the frontend.
+// liveCountry: pass the country resolved from cf-ipcountry on this request.
+//   This ensures logged-in Nigerian users always get NGN even if their DB
+//   loginHistory stored "Ghana" during a previous bad geo detection.
+const serializeUser = (user, liveCountry) => {
   const lastLogin = user.loginHistory?.[user.loginHistory.length - 1];
-  // Admins can override their viewed country via the dropdown
-  const country = overrideCountry ?? lastLogin?.country ?? "";
-  const { currency, symbol, locale } = getCurrencyFromCountry(country);
   const admin = isAdminEmail(user.email);
+
+  // Priority: explicit override (admin switch) > live request country > DB stored > fallback
+  const rawCountry = liveCountry ?? lastLogin?.country ?? "";
+  const country = rawCountry.toLowerCase().includes("nigeria")
+    ? "Nigeria"
+    : rawCountry.toLowerCase().includes("ghana")
+      ? "Ghana"
+      : rawCountry || "Ghana";
+
+  const { currency, symbol, locale } = getCurrencyFromCountry(country);
 
   return {
     _id: user._id,
@@ -85,12 +127,10 @@ const serializeUser = (user, overrideCountry) => {
     profilePicture: user.profilePicture,
     cartItems: user.cartItems,
     subscription: user.subscription ?? null,
-    // ── Geo / currency ──
     country,
     currency,
     symbol,
     locale,
-    // Admins can see both countries — detected country stored separately
     detectedCountry: lastLogin?.country ?? "",
   };
 };
@@ -157,7 +197,7 @@ export const register = async (req, res) => {
 
     res.status(200).json({
       message: "Registration successful",
-      user: serializeUser(user),
+      user: serializeUser(user, resolveCountryFromCF(req).country),
     });
 
     // Send welcome emails (fire-and-forget — never blocks the response)
@@ -186,34 +226,50 @@ export const login = async (req, res) => {
         .status(400)
         .json({ message: "Incorrect username and password" });
 
+    // Use cf-ipcountry for instant reliable country detection (no Geoapify call)
+    // Still call Geoapify for city/location detail in loginHistory (non-blocking)
+    const { country: liveCountry } = resolveCountryFromCF(req);
     const ip = resolveClientIP(req);
-    const geoData = await getLocationFromIP(ip);
 
-    // Sync admin role — if email is in ADMIN_EMAILS, always ensure role is "admin"
-    // (handles case where email was added to env after account was created)
+    // Sync admin role if needed
     if (isAdminEmail(user.email) && user.role !== "admin") {
       await User.updateOne({ _id: user._id }, { role: "admin" });
     }
 
-    // Push new login event — this becomes the "last login" used for currency
+    // Push login event — fire geo lookup non-blocking so login is fast
+    const geoPromise = getLocationFromIP(ip).catch(() => ({}));
+
     await User.updateOne(
       { _id: user._id },
       {
         $push: {
           loginHistory: {
             ip,
-            country: geoData?.country || "Unknown",
-            city: geoData?.city || "Unknown",
-            location: geoData?.location || "Unknown",
+            country: liveCountry, // use CF country — reliable
+            city: "detecting…",
+            location: "detecting…",
             userAgent: req.headers["user-agent"],
           },
         },
       },
     );
 
-    // Reload user so loginHistory includes the entry we just pushed
-    const updatedUser = await User.findById(user._id);
+    // Update city/location after geo resolves (non-blocking, best-effort)
+    geoPromise.then(async (geoData) => {
+      if (geoData?.city) {
+        await User.updateOne(
+          { _id: user._id, "loginHistory.ip": ip },
+          {
+            $set: {
+              "loginHistory.$.city": geoData.city || liveCountry,
+              "loginHistory.$.location": geoData.location || liveCountry,
+            },
+          },
+        ).catch(() => {});
+      }
+    });
 
+    const updatedUser = await User.findById(user._id);
     const accessToken = generateAccessToken(updatedUser);
     const refreshToken = generateRefreshToken(updatedUser);
     const opts = cookieOptions();
@@ -227,10 +283,11 @@ export const login = async (req, res) => {
       maxAge: 7 * 24 * 60 * 60 * 1000,
     });
 
+    // Pass liveCountry so Nigerians get NGN even if DB has wrong country stored
     res.status(200).json({
       message: "Login successful",
       accessToken,
-      user: serializeUser(updatedUser),
+      user: serializeUser(updatedUser, liveCountry),
     });
   } catch (error) {
     console.error(error);
@@ -239,14 +296,15 @@ export const login = async (req, res) => {
 };
 
 // ── GET CURRENT USER (/auth/me) ────────────────────────────────────────────
-// Called by restoreSession after refresh — must return same shape as login
+// Called by restoreSession after refresh — must return same shape as login.
+// Uses cf-ipcountry for live country so Nigerian users always get NGN.
 export const getCurrentUser = async (req, res) => {
   try {
     const user = await User.findById(req.user.userId);
-
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    res.status(200).json({ user: serializeUser(user) });
+    const { country: liveCountry } = resolveCountryFromCF(req);
+    res.status(200).json({ user: serializeUser(user, liveCountry) });
   } catch (error) {
     res.status(500).json({ message: "Server error" });
   }
@@ -426,46 +484,11 @@ export const getGuestLocation = async (req, res) => {
 
 // ── GUEST COUNTRY (/auth/guest-country) ───────────────────────────────────
 // Called by GuestLocationDetector on app mount for unauthenticated visitors.
-// Returns their country + currency from IP — no auth required.
-// Response is intentionally minimal and fast (no DB write).
+// Uses Cloudflare's cf-ipcountry header — instant, free, always accurate.
+// No Geoapify call needed. Falls back to Ghana only if not behind Cloudflare.
 export const getGuestCountry = async (req, res) => {
-  try {
-    const ip = resolveClientIP(req);
-    const geo = await getLocationFromIP(ip);
-
-    // If geo failed (timeout / API down), signal the frontend to NOT cache
-    // the result so it retries on the next page load.
-    if (!geo.country) {
-      return res.json({
-        country: "Ghana",
-        currency: "GHS",
-        symbol: "₵",
-        detectedFrom: "fallback",
-        detected: false, // ← frontend must NOT cache this
-      });
-    }
-
-    const c = geo.country.toLowerCase();
-    const country = c.includes("nigeria") ? "Nigeria" : "Ghana";
-    const currency = country === "Nigeria" ? "NGN" : "GHS";
-    const symbol = currency === "NGN" ? "₦" : "₵";
-
-    res.json({
-      country,
-      currency,
-      symbol,
-      detectedFrom: geo.country,
-      detected: true, // ← frontend can safely cache this
-    });
-  } catch {
-    res.json({
-      country: "Ghana",
-      currency: "GHS",
-      symbol: "₵",
-      detectedFrom: "fallback",
-      detected: false,
-    });
-  }
+  const result = resolveCountryFromCF(req);
+  res.json(result);
 };
 
 // ── ADMIN: SWITCH COUNTRY VIEW ──────────────────────────────────────────────
