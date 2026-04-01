@@ -87,24 +87,37 @@ app.use("/uploads", express.static("uploads"));
 
 // ── Proxy trust ───────────────────────────────────────────────────────────────
 // Stack: User → Cloudflare (1 hop) → Render load balancer (1 hop) → app
-// Setting to 2 means Express trusts exactly 2 proxy hops, not the whole internet.
-// express-rate-limit rejects "true" because it allows IP spoofing via XFF headers.
-// We bypass that concern entirely by using resolveClientIP() as the rate-limit
-// key generator — it reads CF-Connecting-IP first, which Cloudflare sets and
-// users cannot spoof, so the key is always the real visitor IP.
 app.set("trust proxy", 2);
 
-// ── Rate limiting ─────────────────────────────────────────────────────────────
-import { resolveClientIP } from "./lib/resolveIp.js";
+// ── Real IP helper (inlined — no separate file needed) ───────────────────────
+function resolveClientIP(req) {
+  const cf = req.headers["cf-connecting-ip"];
+  if (cf && isPublicIP(cf)) return cf.trim();
+  const xri = req.headers["x-real-ip"];
+  if (xri && isPublicIP(xri)) return xri.trim();
+  const xff = req.headers["x-forwarded-for"];
+  if (xff) {
+    const first = xff.split(",")[0]?.trim();
+    if (first && isPublicIP(first)) return first;
+  }
+  return req.socket?.remoteAddress ?? "";
+}
 
+function isPublicIP(ip) {
+  if (!ip) return false;
+  if (ip === "::1" || ip === "127.0.0.1") return false;
+  if (/^10\./.test(ip)) return false;
+  if (/^192\.168\./.test(ip)) return false;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return false;
+  return true;
+}
+
+// ── Rate limiting ─────────────────────────────────────────────────────────────
 app.use(
   rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 500, // requests per window per IP
-    // Use our own IP resolver so rate limiting keys on the real visitor IP,
-    // not the Cloudflare or Render proxy IP.
+    windowMs: 15 * 60 * 1000,
+    max: 500,
     keyGenerator: (req) => resolveClientIP(req) || req.ip || "unknown",
-    // Skip validation warning — we handle proxy trust correctly above.
     validate: { trustProxy: false },
     standardHeaders: true,
     legacyHeaders: false,

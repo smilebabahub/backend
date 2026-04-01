@@ -4,12 +4,40 @@ import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import nodemailer from "nodemailer";
 import { sendRegistrationEmails } from "../lib/emailService.js";
-import { resolveClientIP } from "../lib/resolveIp.js";
 import {
   generateAccessToken,
   generateRefreshToken,
 } from "../utils/generateTokens.js";
 import axios from "axios";
+
+// ── Real IP resolution ─────────────────────────────────────────────────────
+// Reads CF-Connecting-IP first (set by Cloudflare, cannot be spoofed),
+// then falls through X-Real-IP → X-Forwarded-For → socket.
+// Inlined here to avoid a missing-module deploy error.
+function resolveClientIP(req) {
+  const cf = req.headers["cf-connecting-ip"];
+  if (cf && isPublicIP(cf)) return cf.trim();
+
+  const xri = req.headers["x-real-ip"];
+  if (xri && isPublicIP(xri)) return xri.trim();
+
+  const xff = req.headers["x-forwarded-for"];
+  if (xff) {
+    const first = xff.split(",")[0]?.trim();
+    if (first && isPublicIP(first)) return first;
+  }
+
+  return req.socket?.remoteAddress ?? "";
+}
+
+function isPublicIP(ip) {
+  if (!ip) return false;
+  if (ip === "::1" || ip === "127.0.0.1") return false;
+  if (/^10\./.test(ip)) return false;
+  if (/^192\.168\./.test(ip)) return false;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return false;
+  return true;
+}
 
 // ── Currency helper ────────────────────────────────────────────────────────
 // Extend this map as you expand to more countries
