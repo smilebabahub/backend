@@ -59,17 +59,34 @@ app.use(express.urlencoded({ extended: true, limit: "30mb" }));
 app.use(cookieParser());
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
-const ALLOWED_ORIGINS = [
+// Exact origins always allowed
+const ALLOWED_ORIGINS_EXACT = [
   "http://localhost:3000",
   "http://localhost:3001",
-  process.env.NEXT_PUBLIC_APP_URL,
+  "https://smilebabahub.com",
   "https://www.smilebabahub.com",
+  "https://smilebabahub.vercel.app", // Vercel production
+  process.env.NEXT_PUBLIC_APP_URL, // from env (e.g. custom domain)
+  process.env.FRONTEND_URL, // extra override if needed
 ].filter(Boolean);
+
+// Pattern-matched origins (Vercel preview deployments)
+const ALLOWED_ORIGIN_PATTERNS = [
+  /^https:\/\/smilebabahub-[a-z0-9-]+-tettehs-projects\.vercel\.app$/,
+  /^https:\/\/smilebabahub.*\.vercel\.app$/,
+];
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // same-origin / non-browser requests
+  if (ALLOWED_ORIGINS_EXACT.includes(origin)) return true;
+  if (ALLOWED_ORIGIN_PATTERNS.some((re) => re.test(origin))) return true;
+  return false;
+}
 
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      if (isAllowedOrigin(origin)) return cb(null, true);
       console.warn(`CORS blocked: ${origin}`);
       cb(new Error(`Origin ${origin} not allowed`));
     },
@@ -153,7 +170,10 @@ app.get(
 // ── Socket.IO ─────────────────────────────────────────────────────────────────
 const io = new Server(server, {
   cors: {
-    origin: ALLOWED_ORIGINS,
+    origin: (origin, cb) => {
+      if (isAllowedOrigin(origin)) return cb(null, true);
+      cb(new Error(`Socket.IO origin ${origin} not allowed`));
+    },
     methods: ["GET", "POST"],
     credentials: true,
   },
