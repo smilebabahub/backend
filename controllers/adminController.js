@@ -400,7 +400,7 @@ export const getConversionStats = async (req, res) => {
         title:          ad.title,
         category:       ad.category?.main,
         country:        ad.location?.country,
-        vendor:         (ad.postedBy )?.username ?? "—",
+        vendor:         ad.postedBy?.username ?? "—",
         views:          ad.views ?? 0,
         contacts:       ad.contactClicks ?? 0,
         conversionRate: ad.views > 0

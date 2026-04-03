@@ -11,7 +11,7 @@ import { bustFeedCache } from "../lib/redis.js";
 /** Calculate listing expiry date based on vendor's subscription plan */
 function getExpiryDate(planId) {
   const daysMap = { Basic: 3, standard: 30, popular: 30, premium: 30 };
-  const days    = daysMap[planId] ?? 3;
+  const days = daysMap[planId] ?? 3;
   return new Date(Date.now() + days * 86400000);
 }
 
@@ -20,16 +20,173 @@ function serializeAd(ad) {
   const obj = ad.toObject ? ad.toObject() : ad;
   return {
     ...obj,
-    isExpired:  obj.expiresAt ? new Date(obj.expiresAt) < new Date() : false,
-    daysLeft:   obj.expiresAt
-      ? Math.max(0, Math.ceil((new Date(obj.expiresAt) - Date.now()) / 86400000))
+    isExpired: obj.expiresAt ? new Date(obj.expiresAt) < new Date() : false,
+    daysLeft: obj.expiresAt
+      ? Math.max(
+          0,
+          Math.ceil((new Date(obj.expiresAt) - Date.now()) / 86400000),
+        )
       : null,
-    coverImage: obj.images?.find((i) => i.isCover)?.url ?? obj.images?.[0]?.url ?? null,
+    coverImage:
+      obj.images?.find((i) => i.isCover)?.url ?? obj.images?.[0]?.url ?? null,
   };
 }
 
 // ── CREATE AD ──────────────────────────────────────────────────────────────
 // POST /ads
+// ── Nigerian state names — used to infer country from region ──────────────
+const NG_STATES = new Set([
+  "Lagos",
+  "Abuja FCT",
+  "Kano",
+  "Oyo",
+  "Rivers",
+  "Kaduna",
+  "Delta",
+  "Ogun",
+  "Anambra",
+  "Imo",
+  "Plateau",
+  "Edo",
+  "Borno",
+  "Enugu",
+  "Katsina",
+  "Adamawa",
+  "Cross River",
+  "Akwa Ibom",
+  "Sokoto",
+  "Kwara",
+  "Osun",
+  "Ondo",
+  "Bauchi",
+  "Niger",
+  "Gombe",
+  "Kebbi",
+  "Zamfara",
+  "Yobe",
+  "Taraba",
+  "Ebonyi",
+  "Ekiti",
+  "Nassarawa",
+  "Bayelsa",
+  "Jigawa",
+  "Benue",
+  "Abia",
+  "Kogi",
+]);
+
+// Well-known Nigerian cities that are unambiguous
+const NG_CITIES = new Set([
+  "Ikeja",
+  "Lekki",
+  "Victoria Island",
+  "Surulere",
+  "Yaba",
+  "Ajah",
+  "Festac",
+  "Ikorodu",
+  "Gbagada",
+  "Oshodi",
+  "Agege",
+  "Alimosho",
+  "Badagry",
+  "Epe",
+  "Port Harcourt",
+  "Aba",
+  "Onitsha",
+  "Warri",
+  "Benin City",
+  "Calabar",
+  "Uyo",
+  "Enugu City",
+  "Owerri",
+  "Kaduna City",
+  "Ibadan",
+  "Kano City",
+  "Abuja",
+  "Maiduguri",
+  "Ilorin",
+  "Abeokuta",
+  "Akure",
+  "Osogbo",
+]);
+
+const GH_REGIONS = new Set([
+  "Greater Accra",
+  "Ashanti",
+  "Western",
+  "Eastern",
+  "Central",
+  "Northern",
+  "Upper East",
+  "Upper West",
+  "Volta",
+  "Brong-Ahafo",
+  "Western North",
+  "Ahafo",
+  "Bono East",
+  "Oti",
+  "North East",
+  "Savannah",
+]);
+
+/**
+ * Infer the correct country from location + price signals.
+ *
+ * Priority (highest → lowest confidence):
+ *   1. NGN currency          — unambiguous Nigerian signal
+ *   2. Region is a Nigerian state — e.g. "Lagos", "Kano"
+ *   3. City is a known Nigerian city — e.g. "Lekki", "Ikeja"
+ *   4. +234 phone / 0xxx Nigerian local format
+ *   5. GHS currency          — Ghana signal, but lower than region
+ *      (because Nigerian vendors sometimes pick wrong currency)
+ *   6. Region is a Ghanaian region
+ *   7. Explicit location.country (least trusted — often stale)
+ *
+ * Why region beats currency:
+ *   Nigerian vendors on a Ghana-defaulted account often post with GHS
+ *   but enter their real state (Lagos, Abuja etc.). The region is a
+ *   much more reliable signal in that scenario.
+ */
+function inferCountry(location, price, contact) {
+  const currency = (price?.currency || "").toUpperCase();
+  const region = (location?.region || "").trim();
+  const city = (location?.city || "").trim();
+  const phone = (contact?.phone || location?.phone || "").replace(/\s/g, "");
+  const whatsapp = (contact?.whatsapp || "").replace(/\s/g, "");
+
+  // 1. NGN currency — strongest Nigerian signal
+  if (currency === "NGN") return { country: "Nigeria", countryCode: "NG" };
+
+  // 2. Nigerian state in region field
+  if (NG_STATES.has(region)) return { country: "Nigeria", countryCode: "NG" };
+
+  // 3. Known Nigerian city
+  if (NG_CITIES.has(city)) return { country: "Nigeria", countryCode: "NG" };
+
+  // 4. Phone number signals
+  // +234 international, 234xxx direct, 0xxx Nigerian local (07x, 08x, 09x)
+  const isNGPhone = (p) =>
+    p.startsWith("+234") || p.startsWith("234") || /^0[789]\d{9}$/.test(p); // Nigerian mobile: 080xxxxxxxx, 090xxxxxxxx
+
+  if (isNGPhone(phone) || isNGPhone(whatsapp)) {
+    return { country: "Nigeria", countryCode: "NG" };
+  }
+
+  // 5. GHS currency — Ghana signal, but only if nothing above said Nigeria
+  if (currency === "GHS") return { country: "Ghana", countryCode: "GH" };
+
+  // 6. Ghanaian region
+  if (GH_REGIONS.has(region)) return { country: "Ghana", countryCode: "GH" };
+
+  // 7. Explicit location.country (least trusted)
+  if (location?.country === "Nigeria")
+    return { country: "Nigeria", countryCode: "NG" };
+
+  // Default
+  return { country: "Ghana", countryCode: "GH" };
+}
+
 export const createAd = async (req, res) => {
   try {
     const userId = req.user.userId;
@@ -37,16 +194,33 @@ export const createAd = async (req, res) => {
     const user = await User.findById(userId).select("role subscription");
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    const planId   = user.subscription?.plan ?? "Basic";
+    const planId = user.subscription?.plan ?? "Basic";
     const planName = PLAN_NAMES[planId] ?? "Smile";
     const expiresAt = getExpiryDate(planId);
 
     const {
-      title, description, category, attributes, images,
-      location, contact, price, negotiable, delivery,
-      condition, tags, videoUrl,
+      title,
+      description,
+      category,
+      attributes,
+      images,
+      location,
+      contact,
+      price,
+      negotiable,
+      delivery,
+      condition,
+      tags,
+      videoUrl,
     } = req.body;
 
+    // ── Infer correct country — region/city/phone beats stale currency ──────
+    const { country, countryCode } = inferCountry(location, price, contact);
+    const resolvedLocation = {
+      ...location,
+      country,
+      countryCode,
+    };
 
     const ad = await Ad.create({
       title,
@@ -54,30 +228,35 @@ export const createAd = async (req, res) => {
       slug: null,
       category,
       attributes: attributes ?? [],
-      images:     Array.isArray(images) ? images : [],
-      videoUrl:   videoUrl ?? null,
+      images: Array.isArray(images) ? images : [],
+      videoUrl: videoUrl ?? null,
       price: {
-        amount:   Number(price.amount),
+        amount: Number(price.amount),
         currency: price.currency,
       },
       negotiable: negotiable ?? "not_sure",
-      location,
+      location: resolvedLocation,
       contact,
-      delivery:   delivery ?? { available: false, option: "pickup_only" },
-      condition:  condition ?? "not_applicable",
+      delivery: delivery ?? { available: false, option: "pickup_only" },
+      condition: condition ?? "not_applicable",
       tags: Array.isArray(tags)
         ? tags
-        : (typeof tags === "string" ? tags.split(",").map((t) => t.trim()).filter(Boolean) : []),
+        : typeof tags === "string"
+          ? tags
+              .split(",")
+              .map((t) => t.trim())
+              .filter(Boolean)
+          : [],
       subscription: {
-        plan:        planId,
-        package:     planName,
-        startedAt:   new Date(),
+        plan: planId,
+        package: planName,
+        startedAt: new Date(),
         expiresAt,
         listingDays: planId === "Basic" ? 3 : 30,
       },
       moderation: { status: "approved" },
-      isActive:   true,
-      postedBy:   userId,
+      isActive: true,
+      postedBy: userId,
       expiresAt,
     });
 
@@ -86,8 +265,8 @@ export const createAd = async (req, res) => {
       ad: serializeAd(ad),
     });
 
-    // Bust feed cache for this ad's country so it appears immediately
-    bustFeedCache(ad.location?.country || "Ghana").catch(() => {});
+    // Bust feed cache for the correct country
+    bustFeedCache(country).catch(() => {});
   } catch (error) {
     console.error("createAd error:", error);
     res.status(500).json({ message: "Failed to create ad" });
@@ -101,43 +280,49 @@ export const createAd = async (req, res) => {
 export const getAds = async (req, res) => {
   try {
     const {
-      country, category, sub, leaf,
-      minPrice, maxPrice, currency,
-      condition, city, region,
-      search, negotiable,
+      country,
+      category,
+      sub,
+      leaf,
+      minPrice,
+      maxPrice,
+      currency,
+      condition,
+      city,
+      region,
+      search,
+      negotiable,
       sort = "newest",
-      page = 1, limit = 20,
+      page = 1,
+      limit = 20,
     } = req.query;
 
     // ── Country filter ─────────────────────────────────────────────────────
     // Default to Ghana if no country sent — always scope to a country.
     // Frontend always sends country (resolved from user/guest/fallback),
     // but if somehow it's missing we still return useful results.
-    const resolvedCountry = (country)?.trim() || "Ghana";
+    const resolvedCountry = String(country || "").trim() || "Ghana";
 
     const filter = {
       isActive: true,
-      isSold:   false,
+      isSold: false,
       isPaused: false,
       "location.country": resolvedCountry,
-      $or: [
-        { expiresAt: { $gt: new Date() } },
-        { expiresAt: null },
-      ],
+      $or: [{ expiresAt: { $gt: new Date() } }, { expiresAt: null }],
     };
 
-    if (region)    filter["location.region"]   = { $regex: region, $options: "i" };
-    if (city)      filter["location.city"]     = { $regex: city,   $options: "i" };
-    if (category)  filter["category.main"]     = category;
-    if (sub)       filter["category.sub"]      = sub;
-    if (leaf)      filter["category.leaf"]     = leaf;
-    if (condition) filter.condition            = condition;
-    if (negotiable)filter.negotiable           = negotiable;
+    if (region) filter["location.region"] = { $regex: region, $options: "i" };
+    if (city) filter["location.city"] = { $regex: city, $options: "i" };
+    if (category) filter["category.main"] = category;
+    if (sub) filter["category.sub"] = sub;
+    if (leaf) filter["category.leaf"] = leaf;
+    if (condition) filter.condition = condition;
+    if (negotiable) filter.negotiable = negotiable;
 
     if (minPrice || maxPrice) {
       filter["price.amount"] = {};
-      if (minPrice) (filter["price.amount"]).$gte = Number(minPrice);
-      if (maxPrice) (filter["price.amount"]).$lte = Number(maxPrice);
+      if (minPrice) filter["price.amount"].$gte = Number(minPrice);
+      if (maxPrice) filter["price.amount"].$lte = Number(maxPrice);
     }
     if (currency) filter["price.currency"] = currency;
 
@@ -148,16 +333,16 @@ export const getAds = async (req, res) => {
 
     // Sort options
     const sortMap = {
-      newest:    { "boost.isBoosted": -1, createdAt: -1 },
-      oldest:    { createdAt: 1 },
+      newest: { "boost.isBoosted": -1, createdAt: -1 },
+      oldest: { createdAt: 1 },
       price_asc: { "price.amount": 1 },
-      price_desc:{ "price.amount": -1 },
-      popular:   { views: -1 },
+      price_desc: { "price.amount": -1 },
+      popular: { views: -1 },
       // Boosted ads always float to top within any sort
     };
     const sortQuery = sortMap[sort] ?? sortMap.newest;
 
-    const skip  = (Number(page) - 1) * Number(limit);
+    const skip = (Number(page) - 1) * Number(limit);
     const total = await Ad.countDocuments(filter);
 
     const ads = await Ad.find(filter)
@@ -168,13 +353,13 @@ export const getAds = async (req, res) => {
       .lean();
 
     res.status(200).json({
-      ads:  ads.map(serializeAd),
+      ads: ads.map(serializeAd),
       meta: {
         total,
-        page:       Number(page),
-        limit:      Number(limit),
+        page: Number(page),
+        limit: Number(limit),
         totalPages: Math.ceil(total / Number(limit)),
-        hasNext:    skip + ads.length < total,
+        hasNext: skip + ads.length < total,
       },
     });
   } catch (error) {
@@ -208,7 +393,11 @@ export const getAdById = async (req, res) => {
 // GET /ads/slug/:slug
 export const getAdBySlug = async (req, res) => {
   try {
-    const ad = await Ad.findOne({ slug: req.params.slug, isActive: true, isSold: false })
+    const ad = await Ad.findOne({
+      slug: req.params.slug,
+      isActive: true,
+      isSold: false,
+    })
       .populate("postedBy", "username profilePicture phone")
       .lean();
 
@@ -231,13 +420,25 @@ export const updateAd = async (req, res) => {
 
     // Only the owner or admin can update
     if (String(ad.postedBy) !== req.user.userId && req.user.role !== "admin") {
-      return res.status(403).json({ message: "Not authorised to update this ad" });
+      return res
+        .status(403)
+        .json({ message: "Not authorised to update this ad" });
     }
 
     const allowed = [
-      "title", "description", "category", "attributes",
-      "images", "videoUrl", "price", "negotiable",
-      "location", "contact", "delivery", "condition", "tags",
+      "title",
+      "description",
+      "category",
+      "attributes",
+      "images",
+      "videoUrl",
+      "price",
+      "negotiable",
+      "location",
+      "contact",
+      "delivery",
+      "condition",
+      "tags",
     ];
 
     // If images are being replaced, delete the old ones from Cloudinary first
@@ -250,7 +451,7 @@ export const updateAd = async (req, res) => {
 
     allowed.forEach((field) => {
       if (req.body[field] !== undefined) {
-        (ad )[field] = req.body[field];
+        ad[field] = req.body[field];
       }
     });
 
@@ -274,7 +475,9 @@ export const deleteAd = async (req, res) => {
     if (!ad) return res.status(404).json({ message: "Ad not found" });
 
     if (String(ad.postedBy) !== req.user.userId && req.user.role !== "admin") {
-      return res.status(403).json({ message: "Not authorised to delete this ad" });
+      return res
+        .status(403)
+        .json({ message: "Not authorised to delete this ad" });
     }
 
     // Delete images from Cloudinary (non-fatal if it fails)
@@ -301,14 +504,20 @@ export const deleteAd = async (req, res) => {
 // after Flutterwave confirms payment.
 export const boostAd = async (req, res) => {
   try {
-    const ad = await Ad.findById(req.params.id).select("title postedBy isActive isSold");
+    const ad = await Ad.findById(req.params.id).select(
+      "title postedBy isActive isSold",
+    );
     if (!ad) return res.status(404).json({ message: "Ad not found" });
 
     if (String(ad.postedBy) !== req.user.userId) {
-      return res.status(403).json({ message: "Not authorised to boost this ad" });
+      return res
+        .status(403)
+        .json({ message: "Not authorised to boost this ad" });
     }
     if (!ad.isActive || ad.isSold) {
-      return res.status(400).json({ message: "Cannot boost a sold or inactive ad" });
+      return res
+        .status(400)
+        .json({ message: "Cannot boost a sold or inactive ad" });
     }
 
     const { tier = "standard" } = req.body;
@@ -345,7 +554,7 @@ export const markAsSold = async (req, res) => {
     }
 
     await Ad.findByIdAndUpdate(req.params.id, {
-      isSold:   true,
+      isSold: true,
       isActive: false,
     });
 
@@ -373,7 +582,7 @@ export const togglePause = async (req, res) => {
     });
 
     res.status(200).json({
-      message:  newPaused ? "Ad paused" : "Ad reactivated",
+      message: newPaused ? "Ad paused" : "Ad reactivated",
       isPaused: newPaused,
     });
   } catch (error) {
@@ -401,17 +610,27 @@ export const getMyAds = async (req, res) => {
 
     const filter = { postedBy: userId };
 
-    if (status === "active")  { filter.isActive = true;  filter.isSold = false; filter.isPaused = false; }
-    if (status === "paused")  { filter.isPaused = true; }
-    if (status === "sold")    { filter.isSold = true; }
+    if (status === "active") {
+      filter.isActive = true;
+      filter.isSold = false;
+      filter.isPaused = false;
+    }
+    if (status === "paused") {
+      filter.isPaused = true;
+    }
+    if (status === "sold") {
+      filter.isSold = true;
+    }
     if (status === "expired") {
-      filter.isActive  = false;
-      filter.isSold    = false;
+      filter.isActive = false;
+      filter.isSold = false;
       filter.expiresAt = { $lt: new Date() };
     }
-    if (status === "pending") { filter["moderation.status"] = "pending"; }
+    if (status === "pending") {
+      filter["moderation.status"] = "pending";
+    }
 
-    const skip  = (Number(page) - 1) * Number(limit);
+    const skip = (Number(page) - 1) * Number(limit);
     const total = await Ad.countDocuments(filter);
 
     const ads = await Ad.find(filter)
@@ -421,20 +640,29 @@ export const getMyAds = async (req, res) => {
       .lean();
 
     // Summary stats
-    const [activeCount, soldCount, pausedCount, totalViews] = await Promise.all([
-      Ad.countDocuments({ postedBy: userId, isActive: true,  isSold: false }),
-      Ad.countDocuments({ postedBy: userId, isSold: true }),
-      Ad.countDocuments({ postedBy: userId, isPaused: true }),
-      Ad.aggregate([
-        { $match: { postedBy: new (await import("mongoose")).default.Types.ObjectId(userId) } },
-        { $group: { _id: null, total: { $sum: "$views" } } },
-      ]).then((r) => r[0]?.total ?? 0),
-    ]);
+    const [activeCount, soldCount, pausedCount, totalViews] = await Promise.all(
+      [
+        Ad.countDocuments({ postedBy: userId, isActive: true, isSold: false }),
+        Ad.countDocuments({ postedBy: userId, isSold: true }),
+        Ad.countDocuments({ postedBy: userId, isPaused: true }),
+        Ad.aggregate([
+          {
+            $match: {
+              postedBy: new (await import("mongoose")).default.Types.ObjectId(
+                userId,
+              ),
+            },
+          },
+          { $group: { _id: null, total: { $sum: "$views" } } },
+        ]).then((r) => r[0]?.total ?? 0),
+      ],
+    );
 
     res.status(200).json({
       ads: ads.map(serializeAd),
       meta: {
-        total, page: Number(page),
+        total,
+        page: Number(page),
         limit: Number(limit),
         totalPages: Math.ceil(total / Number(limit)),
       },
@@ -463,41 +691,49 @@ export const moderateAd = async (req, res) => {
     const ad = await Ad.findByIdAndUpdate(
       req.params.id,
       {
-        "moderation.status":       status,
-        "moderation.reviewedBy":   req.user.userId,
-        "moderation.reviewedAt":   new Date(),
+        "moderation.status": status,
+        "moderation.reviewedBy": req.user.userId,
+        "moderation.reviewedAt": new Date(),
         "moderation.rejectReason": rejectReason ?? null,
         // Auto-activate on approval, deactivate on rejection
         isActive: status === "approved",
       },
-      { new: true }
+      { new: true },
     );
 
     if (!ad) return res.status(404).json({ message: "Ad not found" });
 
     // Notify the ad owner
-    const notifType = status === "approved" ? "ad_approved"
-      : status === "rejected" ? "ad_rejected"
-      : "ad_flagged";
+    const notifType =
+      status === "approved"
+        ? "ad_approved"
+        : status === "rejected"
+          ? "ad_rejected"
+          : "ad_flagged";
 
     const notifMessages = {
       approved: `Your ad "${ad.title.slice(0, 50)}" is now live!`,
       rejected: `Your ad "${ad.title.slice(0, 50)}" was not approved. ${rejectReason ? `Reason: ${rejectReason}` : ""}`,
-      flagged:  `Your ad "${ad.title.slice(0, 50)}" has been flagged for review.`,
+      flagged: `Your ad "${ad.title.slice(0, 50)}" has been flagged for review.`,
     };
 
     await Notification.findOneAndUpdate(
       { dedupeKey: `moderation-${ad._id}-${status}` },
       {
-        user:       ad.postedBy,
-        type:       notifType,
-        title:      status === "approved" ? "Ad approved" : status === "rejected" ? "Ad not approved" : "Ad flagged",
-        message:    notifMessages[status],
-        actionUrl:  `/ads/${ad._id}`,
-        actionLabel:"View ad",
-        dedupeKey:  `moderation-${ad._id}-${status}`,
+        user: ad.postedBy,
+        type: notifType,
+        title:
+          status === "approved"
+            ? "Ad approved"
+            : status === "rejected"
+              ? "Ad not approved"
+              : "Ad flagged",
+        message: notifMessages[status],
+        actionUrl: `/ads/${ad._id}`,
+        actionLabel: "View ad",
+        dedupeKey: `moderation-${ad._id}-${status}`,
       },
-      { upsert: true }
+      { upsert: true },
     );
 
     res.status(200).json({ message: `Ad ${status}`, ad: serializeAd(ad) });
@@ -512,12 +748,13 @@ export const moderateAd = async (req, res) => {
 export const getSearchSuggestions = async (req, res) => {
   try {
     const { q, country } = req.query;
-    if (!q || String(q).length < 2) return res.status(200).json({ suggestions: [] });
+    if (!q || String(q).length < 2)
+      return res.status(200).json({ suggestions: [] });
 
     const filter = {
-      isActive:            true,
+      isActive: true,
       "moderation.status": "approved",
-      title:               { $regex: q, $options: "i" },
+      title: { $regex: q, $options: "i" },
     };
     if (country) filter["location.country"] = country;
 
@@ -528,9 +765,9 @@ export const getSearchSuggestions = async (req, res) => {
 
     res.status(200).json({
       suggestions: ads.map((a) => ({
-        label:    a.title,
-        category: (a.category )?.main,
-        slug:     a.slug,
+        label: a.title,
+        category: a.category?.main,
+        slug: a.slug,
       })),
     });
   } catch (error) {
