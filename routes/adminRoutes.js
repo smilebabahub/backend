@@ -13,6 +13,10 @@ import {
   getStatsTrend,
   getConversionStats,
 } from "../controllers/adminController.js";
+import {
+  getLiveAnalytics,
+  getHourlyViews,
+} from "../controllers/analyticsController.js";
 import authMiddleware from "../middleware/authMiddleWare.js";
 
 const router = express.Router();
@@ -28,5 +32,11 @@ router.get("/subscriptions", getSubscriptions);
 router.get("/marketers", getMarketers);
 router.patch("/marketers/:id/payout", markMarketerPaidOut);
 router.get("/ads", getAds);
+
+// ── Analytics — mounted at /admin/analytics/* ─────────────────────────────
+// Frontend calls: GET /api/admin/analytics/live
+//                 GET /api/admin/analytics/hourly
+router.get("/analytics/live", getLiveAnalytics);
+router.get("/analytics/hourly", getHourlyViews);
 
 export default router;

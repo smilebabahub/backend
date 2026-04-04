@@ -25,6 +25,7 @@ import chatRoute from "./routes/chatRoute.js";
 import orderRoutes from "./routes/orderRoute.js";
 import bookingRoutes from "./routes/bookingRoute.js";
 import adminRoutes from "./routes/adminRoutes.js";
+import analyticsRoutes from "./routes/analyticsRoutes.js";
 import marketerRoutes, { updatesRouter } from "./routes/marketerRoute.js";
 import adBoostPaymentRoutes from "./routes/adBoostPaymentRoute.js";
 
@@ -32,7 +33,12 @@ import authMiddleware from "./middleware/authMiddleWare.js";
 import { checkReferralCode } from "./controllers/paymentController.js";
 import { connectRedis } from "./lib/redis.js";
 import { startSubscriptionCron } from "./cron/subscriptionExpiry.js";
-import { registerSocketHandlers } from "./lib/socketHandler.js"; // ← extracted
+import {
+  registerSocketHandlers,
+  notifyUser,
+  onlineUsers,
+  setIO,
+} from "./lib/socketHandler.js";
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
 if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
@@ -161,6 +167,7 @@ app.use("/smilebaba/chat", chatRoute); // ← REST chat API
 app.use("/smilebaba/orders", orderRoutes);
 app.use("/smilebaba/bookings", bookingRoutes);
 app.use("/smilebaba/admin", adminRoutes);
+app.use("/smilebaba/analytics", analyticsRoutes); // page view tracking
 app.get(
   "/smilebaba/payments/referral/:code",
   authMiddleware,
@@ -179,7 +186,11 @@ const io = new Server(server, {
   },
 });
 
-registerSocketHandlers(io); // all socket logic lives in socketHandler.js
+registerSocketHandlers(io);
+setIO(io); // wire pushToUser singleton in socketHandler
+
+// ── Expose io so controllers can push real-time events ────────────────────
+export { io };
 
 // ── Infrastructure ────────────────────────────────────────────────────────────
 await connectRedis().catch((e) =>

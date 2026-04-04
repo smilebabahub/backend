@@ -11,6 +11,7 @@ import {
 } from "../lib/paymentGateway.js";
 import { publish, CHANNELS } from "../lib/redis.js";
 import { sendSubscriptionEmails } from "../lib/emailService.js";
+import { pushToUser } from "../lib/socketHandler.js";
 
 const REFERRAL_DISCOUNT = 0.15;
 
@@ -109,6 +110,9 @@ async function activateSubscription({
     },
     { upsert: true },
   );
+
+  // Push real-time notification to user's bell (if they're online)
+  pushToUser(userId, "new_notification", {});
 
   // Marketer commission — only on first activation (idempotency: check paidOut field)
   if (marketerId) {
