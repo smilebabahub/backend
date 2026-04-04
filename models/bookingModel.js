@@ -16,20 +16,9 @@ const bookingSchema = new mongoose.Schema(
     },
     ad: { type: mongoose.Schema.Types.ObjectId, ref: "Ad", required: true },
     propertyName: { type: String, required: true },
-    propertyType: {
-      type: String,
-      enum: [
-        "apartment",
-        "villa",
-        "studio",
-        "duplex",
-        "townhouse",
-        "beach-house",
-        "luxury-apartment",
-        "short-stay",
-      ],
-      default: "apartment",
-    },
+    // Free-form string — matches whatever subcategory the vendor chose in AdForm
+    // e.g. "self-contained", "chamber & hall", "2-bedroom", "short stay", "studio"
+    propertyType: { type: String, default: "apartment" },
     checkIn: { type: Date, required: true },
     checkOut: { type: Date, required: true },
     guests: { type: Number, default: 1, min: 1 },
