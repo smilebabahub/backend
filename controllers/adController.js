@@ -1,4 +1,5 @@
 // controllers/adController.js
+import mongoose from "mongoose";
 import Ad from "../models/adModel.js";
 import User from "../models/user.js";
 import Notification from "../models/notificationModel.js";
@@ -10,8 +11,8 @@ import { bustFeedCache } from "../lib/redis.js";
 
 /** Calculate listing expiry date based on vendor's subscription plan */
 function getExpiryDate(planId) {
-  const daysMap = { Basic: 3, standard: 30, popular: 30, premium: 30 };
-  const days = daysMap[planId] ?? 3;
+  const daysMap = { Basic: 30, standard: 30, popular: 30, premium: 30 };
+  const days = daysMap[planId] ?? 30;
   return new Date(Date.now() + days * 86400000);
 }
 
@@ -646,13 +647,7 @@ export const getMyAds = async (req, res) => {
         Ad.countDocuments({ postedBy: userId, isSold: true }),
         Ad.countDocuments({ postedBy: userId, isPaused: true }),
         Ad.aggregate([
-          {
-            $match: {
-              postedBy: new (await import("mongoose")).default.Types.ObjectId(
-                userId,
-              ),
-            },
-          },
+          { $match: { postedBy: new mongoose.Types.ObjectId(userId) } },
           { $group: { _id: null, total: { $sum: "$views" } } },
         ]).then((r) => r[0]?.total ?? 0),
       ],

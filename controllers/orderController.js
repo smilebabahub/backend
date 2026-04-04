@@ -15,6 +15,7 @@
 //   createdAt
 
 import Order from "../models/orderModel.js";
+import Ad from "../models/adModel.js";
 
 // ── GET /orders/my ─────────────────────────────────────────────────────────
 // Returns all orders placed BY the logged-in user (as a buyer).
@@ -58,7 +59,6 @@ export const createOrder = async (req, res) => {
     }
 
     // Look up vendor from the ad
-    const Ad = (await import("../models/ad.js")).default;
     const ad = await Ad.findById(adId).select("postedBy");
     if (!ad) return res.status(404).json({ message: "Ad not found" });
 

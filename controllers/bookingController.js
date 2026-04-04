@@ -16,6 +16,7 @@
 //   txRef         — payment reference
 
 import Booking from "../models/bookingModel.js";
+import Ad from "../models/adModel.js";
 
 // ── GET /bookings/my ────────────────────────────────────────────────────────
 // Returns all bookings placed BY the logged-in user (as a guest/tenant).
@@ -72,7 +73,6 @@ export const createBooking = async (req, res) => {
         .json({ message: "Missing required booking fields" });
     }
 
-    const Ad = (await import("../models/ad.js")).default;
     const ad = await Ad.findById(adId).select("postedBy title category");
     if (!ad)
       return res.status(404).json({ message: "Property listing not found" });
