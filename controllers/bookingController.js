@@ -1,60 +1,83 @@
 // controllers/bookingController.js
-// Handles apartment / short-stay bookings placed by guests.
-//
-// Schema fields (stored in Booking model):
-//   guest         — User ref (the person booking)
-//   vendor        — User ref (the property owner)
-//   ad            — Ad ref (the property listing)
-//   propertyName  — string (snapshot of the ad title)
-//   propertyType  — "apartment" | "villa" | "studio" | "short-stay" | etc.
-//   checkIn       — Date
-//   checkOut      — Date
-//   guests        — number (guest count)
-//   totalPrice    — number
-//   currency      — "GHS" | "NGN"
-//   status        — "pending" | "confirmed" | "checked_in" | "checked_out" | "cancelled"
-//   txRef         — payment reference
-
 import Booking from "../models/bookingModel.js";
 import Ad from "../models/adModel.js";
+import User from "../models/user.js";
+import { sendSMS } from "../lib/smsService.js";
 
-// ── GET /bookings/my ────────────────────────────────────────────────────────
-// Returns all bookings placed BY the logged-in user (as a guest/tenant).
+// ── GET /bookings/my — guest's bookings ────────────────────────────────────
 export const getMyBookings = async (req, res) => {
   try {
-    const userId = req.user.userId;
-
-    const bookings = await Booking.find({ guest: userId })
+    const bookings = await Booking.find({ guest: req.user.userId })
       .sort({ createdAt: -1 })
       .populate("vendor", "username")
       .lean();
 
-    const serialized = bookings.map((b) => ({
-      _id: String(b._id),
-      propertyName: b.propertyName ?? "Property",
-      propertyType: b.propertyType ?? "apartment",
-      checkIn: b.checkIn,
-      checkOut: b.checkOut,
-      guests: b.guests ?? 1,
-      totalPrice: b.totalPrice ?? 0,
-      currency: b.currency ?? "GHS",
-      status: b.status ?? "pending",
-      vendor: b.vendor?.username ?? "Unknown host",
-      createdAt: b.createdAt,
-    }));
+    res.status(200).json({
+      bookings: bookings.map((b) => ({
+        _id: String(b._id),
+        propertyName: b.propertyName ?? "Property",
+        propertyType: b.propertyType ?? "apartment",
+        checkIn: b.checkIn,
+        checkOut: b.checkOut,
+        guests: b.guests ?? 1,
+        totalPrice: b.totalPrice ?? 0,
+        currency: b.currency ?? "GHS",
+        status: b.status ?? "pending",
+        vendor: b.vendor?.username ?? "Unknown host",
+        createdAt: b.createdAt,
+      })),
+    });
+  } catch (err) {
+    console.error("getMyBookings error:", err);
+    res.status(500).json({ message: "Failed to fetch bookings" });
+  }
+};
 
-    res.status(200).json({ bookings: serialized });
-  } catch (error) {
-    console.error("getMyBookings error:", error);
+// ── GET /bookings/vendor — vendor's received bookings ──────────────────────
+export const getVendorBookings = async (req, res) => {
+  try {
+    const { status, page = 1, limit = 20 } = req.query;
+    const filter = { vendor: req.user.userId };
+    if (status && status !== "all") filter.status = status;
+
+    const skip = (Number(page) - 1) * Number(limit);
+    const [total, bookings] = await Promise.all([
+      Booking.countDocuments(filter),
+      Booking.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(Number(limit))
+        .populate("guest", "username phone")
+        .lean(),
+    ]);
+
+    res.status(200).json({
+      bookings: bookings.map((b) => ({
+        _id: String(b._id),
+        propertyName: b.propertyName ?? "Property",
+        propertyType: b.propertyType ?? "apartment",
+        checkIn: b.checkIn,
+        checkOut: b.checkOut,
+        guests: b.guests ?? 1,
+        totalPrice: b.totalPrice ?? 0,
+        currency: b.currency ?? "GHS",
+        status: b.status ?? "pending",
+        guest: b.guest?.username ?? "Guest",
+        guestPhone: b.guest?.phone ?? "",
+        createdAt: b.createdAt,
+      })),
+      meta: { total, page: Number(page), limit: Number(limit) },
+    });
+  } catch (err) {
+    console.error("getVendorBookings error:", err);
     res.status(500).json({ message: "Failed to fetch bookings" });
   }
 };
 
 // ── POST /bookings ──────────────────────────────────────────────────────────
-// Create a booking after payment confirmation.
 export const createBooking = async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const guestId = req.user.userId;
     const {
       adId,
       propertyName,
@@ -73,12 +96,12 @@ export const createBooking = async (req, res) => {
         .json({ message: "Missing required booking fields" });
     }
 
-    const ad = await Ad.findById(adId).select("postedBy title category");
+    const ad = await Ad.findById(adId).select("postedBy title");
     if (!ad)
       return res.status(404).json({ message: "Property listing not found" });
 
     const booking = await Booking.create({
-      guest: userId,
+      guest: guestId,
       vendor: ad.postedBy,
       ad: adId,
       propertyName: propertyName ?? ad.title,
@@ -93,14 +116,35 @@ export const createBooking = async (req, res) => {
     });
 
     res.status(201).json({ message: "Booking created successfully", booking });
-  } catch (error) {
-    console.error("createBooking error:", error);
+
+    // ── SMS to vendor (non-blocking) ──────────────────────────────────────
+    const sym = currency === "NGN" ? "₦" : "₵";
+    const checkInFmt = new Date(checkIn).toLocaleDateString("en-GH", {
+      day: "numeric",
+      month: "short",
+    });
+    const checkOutFmt = new Date(checkOut).toLocaleDateString("en-GH", {
+      day: "numeric",
+      month: "short",
+    });
+    const vendor = await User.findById(ad.postedBy)
+      .select("phone username")
+      .lean();
+    if (vendor?.phone) {
+      sendSMS(
+        vendor.phone,
+        `SmileBaba: New booking for "${booking.propertyName}" — ${sym}${Number(totalPrice).toLocaleString()}. ` +
+          `Check-in: ${checkInFmt}, Check-out: ${checkOutFmt}. ` +
+          `Confirm at: https://smilebabahub.com/vendor/orders`,
+      ).catch((e) => console.error("[SMS booking]", e.message));
+    }
+  } catch (err) {
+    console.error("createBooking error:", err);
     res.status(500).json({ message: "Failed to create booking" });
   }
 };
 
 // ── PATCH /bookings/:id/status ──────────────────────────────────────────────
-// Vendor confirms, checks in, checks out, or cancels a booking.
 export const updateBookingStatus = async (req, res) => {
   try {
     const { status } = req.body;
@@ -120,8 +164,22 @@ export const updateBookingStatus = async (req, res) => {
     await booking.save();
 
     res.status(200).json({ message: "Booking status updated", booking });
-  } catch (error) {
-    console.error("updateBookingStatus error:", error);
+
+    // ── SMS to guest on status change ──────────────────────────────────────
+    const guest = await User.findById(booking.guest).select("phone").lean();
+    if (guest?.phone) {
+      const msgs = {
+        confirmed: `SmileBaba: Your booking for "${booking.propertyName}" is confirmed! See you on ${new Date(booking.checkIn).toLocaleDateString("en-GH", { day: "numeric", month: "short" })}.`,
+        checked_in: `SmileBaba: You've been checked in to "${booking.propertyName}". Enjoy your stay! 🏠`,
+        checked_out: `SmileBaba: Check-out complete for "${booking.propertyName}". Thanks for staying with us!`,
+        cancelled: `SmileBaba: Your booking for "${booking.propertyName}" was cancelled. Contact support if unexpected.`,
+      };
+      sendSMS(guest.phone, msgs[status]).catch((e) =>
+        console.error("[SMS booking status]", e.message),
+      );
+    }
+  } catch (err) {
+    console.error("updateBookingStatus error:", err);
     res.status(500).json({ message: "Failed to update booking" });
   }
 };
