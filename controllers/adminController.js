@@ -5,6 +5,7 @@ import Marketer from "../models/marketerModel.js";
 import Ad       from "../models/adModel.js";
 import Stats    from "../models/statsModel.js";
 
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 const parsePage  = (q) => Math.max(1, parseInt(q ?? "1",  10));
 const parseLimit = (q) => Math.min(100, Math.max(1, parseInt(q ?? "20", 10)));
@@ -81,14 +82,16 @@ export const getOverview = async (req, res) => {
 // Paginated user list with search + role filter
 export const getUsers = async (req, res) => {
   try {
-    const page   = parsePage(req.query.page);
-    const limit  = parseLimit(req.query.limit);
-    const skip   = (page - 1) * limit;
-    const search = req.query.search?.trim();
-    const role   = req.query.role;       // "guest" | "vendor" | "admin" | undefined
+    const page    = parsePage(req.query.page);
+    const limit   = parseLimit(req.query.limit);
+    const skip    = (page - 1) * limit;
+    const search  = req.query.search?.trim();
+    const role    = req.query.role;     // "guest" | "vendor" | "admin" | undefined
+    const country = req.query.country;  // "Ghana" | "Nigeria" | undefined
 
     const filter = {};
-    if (role) filter.role = role;
+    if (role)    filter.role    = role;
+    if (country) filter.country = country;
     if (search) {
       filter.$or = [
         { username: { $regex: search, $options: "i" } },
@@ -97,7 +100,7 @@ export const getUsers = async (req, res) => {
       ];
     }
 
-    const [users, total] = await Promise.all([
+    const [users, total, totalVendors, totalGuests] = await Promise.all([
       User.find(filter)
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -105,11 +108,16 @@ export const getUsers = async (req, res) => {
         .select("-password -loginHistory")
         .lean(),
       User.countDocuments(filter),
+      User.countDocuments({ ...filter, role: "vendor" }),
+      User.countDocuments({ ...filter, role: "guest"  }),
     ]);
 
     res.status(200).json({
       users,
-      meta: { page, limit, total, pages: Math.ceil(total / limit) },
+      meta: {
+        page, limit, total, pages: Math.ceil(total / limit),
+        totalVendors, totalGuests,
+      },
     });
   } catch (error) {
     console.error("getUsers error:", error);
@@ -415,5 +423,87 @@ export const getConversionStats = async (req, res) => {
   } catch (error) {
     console.error("getConversionStats error:", error);
     res.status(500).json({ message: "Failed to fetch conversion stats" });
+  }
+};
+
+// ── POST /admin/email/send — send email to individual user or marketer ─────
+export const sendAdminEmail = async (req, res) => {
+  try {
+    const { recipientType, recipientId, subject, message } = req.body;
+    if (!recipientId || !subject || !message) {
+      return res.status(400).json({ message: "recipientId, subject and message are required" });
+    }
+
+    let to, name;
+
+    if (recipientType === "marketer") {
+      const m = await Marketer.findById(recipientId).select("email name").lean();
+      if (!m) return res.status(404).json({ message: "Marketer not found" });
+      to   = m.email;
+      name = m.name;
+    } else {
+      const u = await User.findById(recipientId).select("email username").lean();
+      if (!u) return res.status(404).json({ message: "User not found" });
+      to   = u.email;
+      name = u.username;
+    }
+
+    const { sendAdminDirectEmail } = await import("../lib/emailService.js");
+    await sendAdminDirectEmail({ to, name, subject, message });
+
+    res.status(200).json({ message: `Email sent to ${to}` });
+  } catch (error) {
+    console.error("sendAdminEmail error:", error);
+    res.status(500).json({ message: "Failed to send email" });
+  }
+};
+
+// ── POST /admin/email/bulk — bulk email to vendors, guests, or marketers ──
+export const sendBulkEmail = async (req, res) => {
+  // Respond immediately — bulk send is async
+  res.status(202).json({ message: "Bulk email job started" });
+
+  try {
+    const { audience, country, subject, message } = req.body;
+    // audience: "vendors" | "users" | "marketers" | "all"
+
+    const { sendAdminDirectEmail } = await import("../lib/emailService.js");
+    let recipients = [];
+
+    if (audience === "marketers") {
+      const filter = { isActive: true };
+      recipients = await Marketer.find(filter).select("email name").lean();
+      await Promise.allSettled(
+        recipients.map((m) =>
+          sendAdminDirectEmail({ to: m.email, name: m.name, subject, message })
+        )
+      );
+    } else {
+      const filter = {};
+      if (audience === "vendors") filter.role = "vendor";
+      else if (audience === "users") filter.role = { $in: ["guest", "vendor"] };
+      // "all" — no role filter
+      if (country) filter.country = country;
+
+      recipients = await User.find(filter).select("email username").lean();
+      // Send in batches of 50 to avoid overwhelming the SMTP server
+      const BATCH = 50;
+      for (let i = 0; i < recipients.length; i += BATCH) {
+        const batch = recipients.slice(i, i + BATCH);
+        await Promise.allSettled(
+          batch.map((u) =>
+            sendAdminDirectEmail({ to: u.email, name: u.username, subject, message })
+          )
+        );
+        // Small delay between batches
+        if (i + BATCH < recipients.length) {
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      }
+    }
+
+    console.log(`[bulk email] Sent to ${recipients.length} recipients — subject: "${subject}"`);
+  } catch (err) {
+    console.error("sendBulkEmail error:", err);
   }
 };

@@ -12,6 +12,7 @@
 
 import Ad from "../models/adModel.js";
 import User from "../models/user.js";
+import Purchase from "../models/purchaseModel.js";
 import Notification from "../models/notificationModel.js";
 import {
   BOOST_PRICING,
@@ -43,6 +44,31 @@ async function activateAdBoost({ adId, tier, txRef, payment }) {
     .select("title postedBy")
     .populate("postedBy", "email username");
   if (ad) {
+    // ── Create a Purchase record so boost revenue shows in admin ─────────────
+    await Purchase.findOneAndUpdate(
+      { txRef },
+      {
+        $setOnInsert: { createdAt: now },
+        $set: {
+          user: ad.postedBy._id ?? ad.postedBy,
+          txRef,
+          type: "boost",
+          transactionId: String(payment.id ?? ""),
+          title: `Ad Boost — ${BOOST_TIER_NAMES[tier]} (${days}d)`,
+          planId: tier,
+          billingCycle: "once",
+          adId: adId,
+          amount: payment.amount,
+          currency: payment.currency,
+          status: "successful",
+          periodStart: now,
+          periodEnd: boostedUntil,
+          gatewayMeta: payment,
+        },
+      },
+      { upsert: true, new: true },
+    );
+
     await Notification.findOneAndUpdate(
       { dedupeKey: `boost-${txRef}` },
       {
@@ -180,33 +206,50 @@ export const verifyBoostPayment = async (req, res) => {
       transactionId: transaction_id,
     });
 
+    console.log(
+      "[verifyBoostPayment] payment:",
+      JSON.stringify({
+        id: payment.id,
+        status: payment.status,
+        amount: payment.amount,
+        currency: payment.currency,
+        meta: payment.meta,
+      }),
+    );
+
     if (payment.status !== "successful") {
       return res.redirect(
         `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=not_successful&type=boost`,
       );
     }
 
-    const { adId, tier, userId } = payment.meta;
+    const meta = payment.meta ?? {};
+    const { adId, tier, userId } = meta;
 
-    // Anti-tamper: verify amount matches expected
+    if (!adId || !tier) {
+      console.error("[verifyBoostPayment] missing meta:", meta);
+      return res.redirect(
+        `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=missing_meta&type=boost`,
+      );
+    }
+
     const currency = payment.currency;
     const expectedAmount = BOOST_PRICING[tier]?.prices?.once?.[currency];
-    if (!expectedAmount || payment.amount !== expectedAmount) {
-      console.error("Boost amount mismatch", {
+
+    const diff = Math.abs(payment.amount - expectedAmount);
+    if (!expectedAmount || diff > 1) {
+      console.error("[verifyBoostPayment] amount mismatch", {
         expected: expectedAmount,
         got: payment.amount,
+        diff,
+        tier,
       });
       return res.redirect(
         `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=amount_mismatch&type=boost`,
       );
     }
 
-    await activateAdBoost({
-      adId,
-      tier,
-      txRef: payment.tx_ref,
-      payment,
-    });
+    await activateAdBoost({ adId, tier, txRef: payment.tx_ref, payment });
 
     const destination = returnUrl
       ? decodeURIComponent(returnUrl)
@@ -221,17 +264,18 @@ export const verifyBoostPayment = async (req, res) => {
 };
 
 // ── BOOST WEBHOOK ──────────────────────────────────────────────────────────
-// POST /payments/boost/webhook
-// Handles server-side confirmation from Flutterwave (fallback to verify)
 export const boostPaymentWebhook = async (req, res) => {
   try {
     const countryCode = req.countryCode;
-    const isValid = await verifyWebhookSignature({
+    const isValid = verifyWebhookSignature({
       countryCode,
       headers: req.headers,
       body: req.body,
     });
-    if (!isValid) return res.status(401).end();
+    if (!isValid) {
+      console.warn("[boostWebhook] invalid signature");
+      return res.status(401).end();
+    }
 
     const payload = req.body;
     const isCompleted =
@@ -242,35 +286,52 @@ export const boostPaymentWebhook = async (req, res) => {
       payload.data?.status === "success";
 
     if (isCompleted && isSuccessful) {
-      const payment = payload.data;
-      const { type, adId, tier, userId } =
-        payment.meta ?? payment.metadata ?? {};
+      const data = payload.data;
 
-      // Only handle boost webhooks here
+      // Normalise meta — same as paymentWebhook
+      const rawMeta = data.meta ?? data.payment_meta ?? data.metadata ?? {};
+      const meta = Array.isArray(rawMeta)
+        ? rawMeta.reduce((acc, item) => {
+            acc[item.metaname] = item.metavalue;
+            return acc;
+          }, {})
+        : rawMeta;
+
+      const { type, adId, tier } = meta;
+
+      // Only handle boost webhooks here — subscription webhooks use paymentWebhook
       if (type !== "ad_boost") return res.status(200).end();
 
-      const currency = payment.currency;
-      const amount =
-        currency === "NGN" && payment.amount > 10000
-          ? payment.amount / 100
-          : payment.amount;
-
+      const currency = data.currency;
+      const amount = data.charged_amount ?? data.amount;
       const expectedAmount = BOOST_PRICING[tier]?.prices?.once?.[currency];
-      if (!expectedAmount || amount !== expectedAmount)
-        return res.status(400).end();
+
+      const diff = Math.abs(amount - expectedAmount);
+      if (!expectedAmount || diff > 1) {
+        console.error("[boostWebhook] amount mismatch", {
+          expected: expectedAmount,
+          got: amount,
+          diff,
+          tier,
+          txRef: data.tx_ref,
+        });
+        return res.status(200).end(); // 200 to stop FLW retrying
+      }
 
       await activateAdBoost({
         adId,
         tier,
-        txRef: payment.tx_ref ?? payment.reference,
-        payment: { ...payment, amount },
+        txRef: data.tx_ref ?? data.reference,
+        payment: { ...data, amount, currency },
       });
+
+      console.log(`[boostWebhook] boosted ad ${adId} tier ${tier}`);
     }
 
     res.status(200).end();
   } catch (error) {
     console.error("boostPaymentWebhook error:", error);
-    res.status(500).end();
+    res.status(200).end(); // always 200 to prevent retry loops
   }
 };
 

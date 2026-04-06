@@ -13,7 +13,7 @@ import { publish, CHANNELS } from "../lib/redis.js";
 import { sendSubscriptionEmails } from "../lib/emailService.js";
 import { pushToUser } from "../lib/socketHandler.js";
 
-const REFERRAL_DISCOUNT = 0.15;
+const REFERRAL_DISCOUNT = 0.2;
 
 // Plan tier order — higher index = higher plan
 const PLAN_TIERS = ["Basic", "standard", "popular", "premium"];
@@ -80,6 +80,7 @@ async function activateSubscription({
       $set: {
         user: userId,
         txRef,
+        type: "subscription",
         transactionId: String(payment.id ?? ""),
         title,
         planId,
@@ -89,8 +90,8 @@ async function activateSubscription({
         status: "successful",
         periodStart: now,
         periodEnd: expiresAt,
-        gatewayMeta: payment,
         marketerId: marketerId ?? null,
+        gatewayMeta: payment,
       },
     },
     { upsert: true, new: true },
@@ -405,18 +406,56 @@ export const verifyPayment = async (req, res) => {
       transactionId: transaction_id,
     });
 
+    console.log(
+      "[verifyPayment] payment object:",
+      JSON.stringify({
+        id: payment.id,
+        status: payment.status,
+        amount: payment.amount,
+        currency: payment.currency,
+        tx_ref: payment.tx_ref,
+        meta: payment.meta,
+      }),
+    );
+
     if (payment.status !== "successful") {
+      console.warn("[verifyPayment] not successful:", payment.status);
       return res.redirect(
         `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=not_successful`,
       );
     }
 
-    const { userId, planId, billingCycle, marketerId } = payment.meta;
+    // Meta can be at payment.meta (normalised) or nested variants
+    const meta = payment.meta ?? payment.metadata ?? {};
+    const { userId, planId, billingCycle, marketerId } = meta;
+
+    if (!userId || !planId || !billingCycle) {
+      console.error("[verifyPayment] missing meta fields:", {
+        userId,
+        planId,
+        billingCycle,
+      });
+      return res.redirect(
+        `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=missing_meta`,
+      );
+    }
+
     const baseAmount = PRICING[planId]?.[billingCycle]?.[payment.currency];
     const expectedAmount = marketerId
       ? applyDiscount(baseAmount, true)
       : baseAmount;
-    if (payment.amount !== expectedAmount) {
+
+    // Tolerance check — allow ±1 unit to cover floating-point and rounding
+    // differences between Flutterwave charged_amount and our calculated price
+    const diff = Math.abs(payment.amount - expectedAmount);
+    if (diff > 1) {
+      console.error("[verifyPayment] amount mismatch", {
+        paid: payment.amount,
+        expected: expectedAmount,
+        diff,
+        planId,
+        billingCycle,
+      });
       return res.redirect(
         `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=amount_mismatch`,
       );
@@ -457,12 +496,15 @@ export const verifyPayment = async (req, res) => {
 export const paymentWebhook = async (req, res) => {
   try {
     const countryCode = req.countryCode;
-    const isValid = await verifyWebhookSignature({
+    const isValid = verifyWebhookSignature({
       countryCode,
       headers: req.headers,
       body: req.body,
     });
-    if (!isValid) return res.status(401).end();
+    if (!isValid) {
+      console.warn("[paymentWebhook] invalid signature");
+      return res.status(401).end();
+    }
 
     const payload = req.body;
     const isCompleted =
@@ -473,24 +515,55 @@ export const paymentWebhook = async (req, res) => {
       payload.data?.status === "success";
 
     if (isCompleted && isSuccessful) {
-      const payment = payload.data;
-      const { userId, planId, billingCycle, marketerId } =
-        payment.meta ?? payment.metadata ?? {};
-      const amount =
-        payment.currency === "NGN" && payment.amount > 10000
-          ? payment.amount / 100
-          : payment.amount;
+      const data = payload.data;
 
-      const base = PRICING[planId]?.[billingCycle]?.[payment.currency];
+      // Normalise meta — FLW webhooks use the same shape as verify but
+      // meta can be an array of { metaname, metavalue } or a plain object
+      const rawMeta = data.meta ?? data.payment_meta ?? data.metadata ?? {};
+      const meta = Array.isArray(rawMeta)
+        ? rawMeta.reduce((acc, item) => {
+            acc[item.metaname] = item.metavalue;
+            return acc;
+          }, {})
+        : rawMeta;
+
+      const { userId, planId, billingCycle, marketerId } = meta;
+
+      if (!userId || !planId || !billingCycle) {
+        console.error("[paymentWebhook] missing meta:", {
+          userId,
+          planId,
+          billingCycle,
+          meta,
+        });
+        return res.status(200).end(); // return 200 so FLW doesn't retry
+      }
+
+      // Use charged_amount (actual settlement) — some FLW versions differ from amount
+      const amount = data.charged_amount ?? data.amount;
+
+      const base = PRICING[planId]?.[billingCycle]?.[data.currency];
       const expected = marketerId ? applyDiscount(base, true) : base;
-      if (amount !== expected) return res.status(400).end();
+
+      const diff = Math.abs(amount - expected);
+      if (diff > 1) {
+        console.error("[paymentWebhook] amount mismatch", {
+          paid: amount,
+          expected,
+          diff,
+          planId,
+          billingCycle,
+          txRef: data.tx_ref,
+        });
+        return res.status(200).end(); // return 200 — don't let FLW retry forever
+      }
 
       const expiresAt = await activateSubscription({
         userId,
         planId,
         billingCycle,
-        payment: { ...payment, amount },
-        txRef: payment.tx_ref ?? payment.reference,
+        payment: { ...data, amount, currency: data.currency },
+        txRef: data.tx_ref ?? data.reference,
         marketerId: marketerId || null,
       });
 
@@ -498,33 +571,41 @@ export const paymentWebhook = async (req, res) => {
         userId,
         planId,
         billingCycle,
-        payment: { ...payment, amount },
+        payment: { ...data, amount, currency: data.currency },
         expiresAt,
       }).catch(() => {});
+
+      console.log(
+        `[paymentWebhook] activated ${planId}/${billingCycle} for user ${userId}`,
+      );
     }
 
     res.status(200).end();
   } catch (error) {
     console.error("paymentWebhook error:", error);
-    res.status(500).end();
+    res.status(200).end(); // always 200 to prevent FLW retry loops
   }
 };
 
 // ── PURCHASE HISTORY ──────────────────────────────────────────────────────────
 export const getPurchaseHistory = async (req, res) => {
   try {
-    const purchases = await Purchase.find({
-      user: req.user.userId,
-      status: "successful",
-    })
-      .sort({ createdAt: -1 })
-      .select(
-        "title planId billingCycle amount currency periodStart periodEnd createdAt txRef",
-      )
-      .lean();
+    const userId = req.user.userId;
 
-    // Deduplicate by txRef in case webhook + verify both wrote a record before the
-    // idempotency guard was in place (belt-and-suspenders for existing data)
+    const [purchases, user] = await Promise.all([
+      Purchase.find({
+        user: userId,
+        status: "successful",
+      })
+        .sort({ createdAt: -1 })
+        .select(
+          "title planId billingCycle type amount currency periodStart periodEnd createdAt txRef adId",
+        )
+        .lean(),
+      User.findById(userId).select("subscription role").lean(),
+    ]);
+
+    // Deduplicate by txRef
     const seen = new Set();
     const deduped = purchases.filter((p) => {
       if (seen.has(p.txRef)) return false;
@@ -532,8 +613,41 @@ export const getPurchaseHistory = async (req, res) => {
       return true;
     });
 
-    res.status(200).json({ purchases: deduped });
+    // If vendor has an active subscription but no Purchase record yet
+    // (e.g. admin-granted subscription), synthesise a record so the
+    // history page is never empty for an active vendor
+    const hasPurchaseRecord = deduped.some(
+      (p) => p.type === "subscription" || p.planId === user?.subscription?.plan,
+    );
+
+    if (
+      !hasPurchaseRecord &&
+      user?.subscription?.plan &&
+      user.role === "vendor"
+    ) {
+      deduped.unshift({
+        _id: "synth-active",
+        title: `${user.subscription.plan} Plan (active)`,
+        planId: user.subscription.plan,
+        billingCycle: user.subscription.billingCycle ?? "monthly",
+        type: "subscription",
+        amount: user.subscription.price ?? 0,
+        currency: user.subscription.currency ?? "GHS",
+        periodStart: user.subscription.startedAt,
+        periodEnd: user.subscription.expiresAt,
+        createdAt: user.subscription.startedAt,
+        txRef: "synth-active",
+        adId: null,
+      });
+    }
+
+    res.status(200).json({
+      purchases: deduped,
+      // Current active subscription — used by the history page header
+      activePlan: user?.subscription ?? null,
+    });
   } catch (error) {
+    console.error("getPurchaseHistory error:", error);
     res.status(500).json({ message: "Failed to fetch purchase history" });
   }
 };
