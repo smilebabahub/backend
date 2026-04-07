@@ -6,15 +6,42 @@
 
 import { CHANNELS, publish, createSubscriberClient } from "../lib/redis.js";
 
-// ── App version SSE (/updates/app) ─────────────────────────────────────────
-// Browser connects once and stays connected.
-// When we deploy, we call POST /updates/deploy which publishes to Redis.
-// All connected browsers receive the event and reload.
-export const appUpdatesSSE = async (req, res) => {
+// ── SSE origin helper ─────────────────────────────────────────────────────
+// The global cors() middleware may not apply headers before flushHeaders(),
+// so every SSE handler sets them explicitly.
+function setSseHeaders(req, res) {
+  const origin = req.headers.origin;
+  // Mirror the same allow-list used by the global CORS middleware
+  const allowed = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "https://smilebabahub.com",
+    "https://www.smilebabahub.com",
+    process.env.NEXT_PUBLIC_APP_URL,
+    process.env.FRONTEND_URL,
+  ].filter(Boolean);
+
+  const isAllowed =
+    !origin ||
+    allowed.includes(origin) ||
+    /^https:\/\/smilebabahub.*\.vercel\.app$/.test(origin);
+
+  if (isAllowed && origin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+  }
+
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-store, no-transform");
   res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
+  res.setHeader("X-Accel-Buffering", "no"); // disable Nginx buffering
+}
+
+// ── App version SSE (/updates/app) ─────────────────────────────────────────
+// Browser connects once and stays connected.
+// When we deploy, call POST /updates/deploy — all connected browsers reload.
+export const appUpdatesSSE = async (req, res) => {
+  setSseHeaders(req, res);
   res.flushHeaders();
 
   const heartbeat = setInterval(() => res.write(": heartbeat\n\n"), 25_000);
@@ -43,10 +70,7 @@ export const appUpdatesSSE = async (req, res) => {
 export const marketerStatsSSE = async (req, res) => {
   const { marketerId } = req.marketer;
 
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache, no-store, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Accel-Buffering", "no");
+  setSseHeaders(req, res);
   res.flushHeaders();
 
   const heartbeat = setInterval(() => res.write(": heartbeat\n\n"), 25_000);

@@ -55,7 +55,24 @@ export default router;
 // ── App update routes (separate file but exported here for convenience) ────
 export const updatesRouter = express.Router();
 
-// SSE stream — frontend connects once and listens for deploy events
+// Handle CORS preflight — browsers send OPTIONS before EventSource connects
+updatesRouter.options("/app", (req, res) => {
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Content-Type, Authorization",
+    );
+  }
+  res.sendStatus(204);
+});
+
+// SSE stream — frontend connects once and listens for deploy events.
+// IMPORTANT: 426 means Socket.IO's upgrade handler is racing this route.
+// Ensure server.js mounts /smilebaba/updates BEFORE socket.io attaches.
 updatesRouter.get("/app", appUpdatesSSE);
 
 // Called by CI/CD on deploy

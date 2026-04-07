@@ -1,32 +1,88 @@
 import express from "express";
-import {
-  register,
-  login,
-  logout,
-  refresh,
-  forgotPassword,
-  resetPassword,
-  getCurrentUser,
-  getGuestCountry,
-  adminSwitchCountry,
-} from "../controllers/authController.js";
-import authMiddleware from "../middleware/authMiddleWare.js";
+
 
 const router = express.Router();
 
-router.post("/register", register);
-router.post("/login", login);
-router.post("/logout", logout);
-router.post("/refresh", refresh);
-router.get("/me", authMiddleware, getCurrentUser);
+// routes/authRoutes.js
 
-// Guest country detection — no auth, called on app mount for unauthenticated visitors
-router.get("/guest-country",      getGuestCountry);
+import rateLimit     from "express-rate-limit";
+import { ipKeyGenerator } from "express-rate-limit";
+import {
+  register, login, getCurrentUser, refresh,
+  logout, forgotPassword, resetPassword,
+  getGuestCountry, adminSwitchCountry,
+  updateProfile, changePassword, updateNotifications,
+  updatePaymentDetails, updateShipping, submitPromotion,
+} from "../controllers/authController.js";
+import authMiddleware from "../middleware/authMiddleWare.js";
 
-// Admin: switch viewed country (Ghana ↔ Nigeria)
-router.patch("/admin/country",       authMiddleware, adminSwitchCountry);
 
-router.post("/forgot-password", forgotPassword);
-router.post("/reset-password", resetPassword);
+
+
+// ── IP resolver (inlined — no separate file) ──────────────────────────────
+function resolveClientIP(req) {
+  const cf = req.headers["cf-connecting-ip"];
+  if (cf) return cf.trim();
+  const xff = req.headers["x-forwarded-for"];
+  if (xff) return xff.split(",")[0].trim();
+  return req.socket?.remoteAddress ?? "unknown";
+}
+
+// ── Tight rate limiters for sensitive auth endpoints ──────────────────────
+// Login / register: 10 attempts per 15 min per IP — prevents brute force
+const authLimiter = rateLimit({
+  windowMs:        15 * 60 * 1000,
+  max:             10,
+  message:         { message: "Too many attempts. Please try again in 15 minutes." },
+  keyGenerator:    (req) => ipKeyGenerator(resolveClientIP(req)),
+  validate:        { trustProxy: false },
+  standardHeaders: true,
+  legacyHeaders:   false,
+});
+
+// Password reset: 5 per hour — prevents email flooding
+const resetLimiter = rateLimit({
+  windowMs:        60 * 60 * 1000,
+  max:             5,
+  message:         { message: "Too many password reset requests. Try again in 1 hour." },
+  keyGenerator:    (req) => ipKeyGenerator(resolveClientIP(req)),
+  validate:        { trustProxy: false },
+  standardHeaders: true,
+  legacyHeaders:   false,
+});
+
+// Token refresh: 60 per 15 min — legitimate apps refresh frequently
+const refreshLimiter = rateLimit({
+  windowMs:        15 * 60 * 1000,
+  max:             60,
+  keyGenerator:    (req) => ipKeyGenerator(resolveClientIP(req)),
+  validate:        { trustProxy: false },
+  standardHeaders: true,
+  legacyHeaders:   false,
+});
+
+// ── Public ────────────────────────────────────────────────────────────────
+router.post("/register",        authLimiter,    register);
+router.post("/login",           authLimiter,    login);
+router.post("/refresh",         refreshLimiter, refresh);
+router.post("/forgot-password", resetLimiter,   forgotPassword);
+router.post("/reset-password",  resetLimiter,   resetPassword);
+
+// Guest country detection — low impact, no sensitive data
+router.get("/guest-country",    getGuestCountry);
+
+// ── Protected ─────────────────────────────────────────────────────────────
+router.get("/me",               authMiddleware, getCurrentUser);
+router.post("/logout",          authMiddleware, logout);
+router.patch("/admin/country",    authMiddleware, adminSwitchCountry);
+
+// ── Vendor settings ────────────────────────────────────────────────────────
+router.patch("/profile",          authMiddleware, updateProfile);
+router.patch("/password",         authMiddleware, changePassword);
+router.patch("/notifications",    authMiddleware, updateNotifications);
+router.patch("/payment-details",  authMiddleware, updatePaymentDetails);
+router.patch("/shipping",         authMiddleware, updateShipping);
+router.post("/promotion",         authMiddleware, submitPromotion);
+
 
 export default router;

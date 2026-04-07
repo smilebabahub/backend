@@ -523,3 +523,249 @@ export const adminSwitchCountry = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
+
+// ── PATCH /auth/profile — update user profile ─────────────────────────────
+export const updateProfile = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const {
+      username,
+      phone,
+      city,
+      state,
+      bio,
+      gender,
+      dateOfBirth,
+      storeName,
+      storeSlug,
+      storeCategory,
+      storeDescription,
+      storeEmail,
+      storeWebsite,
+      instagram,
+      facebook,
+      whatsapp,
+      returnPolicy,
+      deliveryPolicy,
+      exchangePolicy,
+    } = req.body;
+
+    const allowed = {
+      username,
+      phone,
+      city,
+      state,
+      bio,
+      gender,
+      dateOfBirth,
+      storeName,
+      storeSlug,
+      storeCategory,
+      storeDescription,
+      storeEmail,
+      storeWebsite,
+      instagram,
+      facebook,
+      whatsapp,
+      returnPolicy,
+      deliveryPolicy,
+      exchangePolicy,
+    };
+    // Remove undefined fields
+    Object.keys(allowed).forEach(
+      (k) => allowed[k] === undefined && delete allowed[k],
+    );
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { $set: allowed },
+      { new: true, runValidators: true },
+    ).select("-password -loginHistory");
+
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    res
+      .status(200)
+      .json({ message: "Profile updated", user: serializeUser(user) });
+  } catch (err) {
+    console.error("updateProfile error:", err);
+    res.status(500).json({ message: "Failed to update profile" });
+  }
+};
+
+// ── PATCH /auth/password — change password ─────────────────────────────────
+export const changePassword = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ message: "Both passwords are required" });
+    }
+    if (newPassword.length < 8) {
+      return res
+        .status(400)
+        .json({ message: "New password must be at least 8 characters" });
+    }
+
+    const user = await User.findById(userId).select("password");
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const match = await bcrypt.compare(currentPassword, user.password);
+    if (!match)
+      return res.status(401).json({ message: "Current password is incorrect" });
+
+    user.password = await bcrypt.hash(newPassword, 12);
+    await user.save();
+
+    res.status(200).json({ message: "Password changed successfully" });
+  } catch (err) {
+    console.error("changePassword error:", err);
+    res.status(500).json({ message: "Failed to change password" });
+  }
+};
+
+// ── PATCH /auth/notifications — save notification preferences ──────────────
+export const updateNotifications = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { notifications } = req.body;
+
+    await User.findByIdAndUpdate(userId, { $set: { notifications } });
+
+    res.status(200).json({ message: "Notification preferences saved" });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to save notifications" });
+  }
+};
+
+// ── PATCH /auth/payment-details — save payout info ────────────────────────
+export const updatePaymentDetails = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { payoutMethod, momoDetails, bankDetails, taxInfo, payoutSchedule } =
+      req.body;
+
+    await User.findByIdAndUpdate(userId, {
+      $set: { payoutMethod, momoDetails, bankDetails, taxInfo, payoutSchedule },
+    });
+
+    res.status(200).json({ message: "Payment details saved" });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to save payment details" });
+  }
+};
+
+// ── PATCH /auth/shipping — save shipping settings ──────────────────────────
+export const updateShipping = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { deliveryZones, deliveryPricing, dispatchTime, packagingNotes } =
+      req.body;
+
+    await User.findByIdAndUpdate(userId, {
+      $set: { deliveryZones, deliveryPricing, dispatchTime, packagingNotes },
+    });
+
+    res.status(200).json({ message: "Shipping settings saved" });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to save shipping settings" });
+  }
+};
+
+// ── POST /auth/promotion — submit promotional video campaign ───────────────
+export const submitPromotion = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const {
+      title,
+      description,
+      category,
+      promotionType,
+      targetRegion,
+      targetAudience,
+      startDate,
+      endDate,
+      budget,
+      currency,
+      contactName,
+      contactPhone,
+      contactEmail,
+      preferredContact,
+      videoUrl,
+      videoName,
+    } = req.body;
+
+    if (!title || !videoUrl || !contactName) {
+      return res
+        .status(400)
+        .json({ message: "Title, video URL and contact name are required" });
+    }
+
+    const user = await User.findById(userId)
+      .select("username email storeName")
+      .lean();
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    // Store promotion record on user document
+    await User.findByIdAndUpdate(userId, {
+      $push: {
+        promotions: {
+          title,
+          description,
+          category,
+          promotionType,
+          targetRegion,
+          targetAudience,
+          startDate,
+          endDate,
+          budget,
+          currency,
+          contactName,
+          contactPhone,
+          contactEmail,
+          preferredContact,
+          videoUrl,
+          videoName,
+          status: "pending",
+          submittedAt: new Date(),
+        },
+      },
+    });
+
+    // Email admin team
+    const { sendAdminDirectEmail } = await import("../lib/emailService.js");
+    const adminEmail = process.env.ADMIN_EMAIL || process.env.EMAIL_USER;
+    if (adminEmail) {
+      await sendAdminDirectEmail({
+        to: adminEmail,
+        name: "SmileBaba Admin",
+        subject: `New Promotion Submission — ${title}`,
+        message: `
+Vendor: ${user.storeName ?? user.username} (${user.email})
+Campaign: ${title}
+Category: ${category}
+Region: ${targetRegion}
+Contact: ${contactName} · ${contactPhone} · ${contactEmail}
+Budget: ${currency} ${budget || "Not specified"}
+Preferred contact: ${preferredContact}
+
+Video: ${videoUrl}
+
+Description:
+${description}
+        `.trim(),
+      });
+    }
+
+    res
+      .status(201)
+      .json({
+        message:
+          "Promotion submitted successfully. We will review and contact you within 2–3 business days.",
+      });
+  } catch (err) {
+    console.error("submitPromotion error:", err);
+    res.status(500).json({ message: "Failed to submit promotion" });
+  }
+};

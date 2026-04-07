@@ -175,6 +175,9 @@ app.get(
 );
 
 // ── Socket.IO ─────────────────────────────────────────────────────────────────
+// allowUpgrades: true (default) but we guard SSE routes from being
+// hijacked by Socket.IO's upgrade handler by checking the path.
+// Socket.IO only handles WebSocket upgrades on its own namespace paths.
 const io = new Server(server, {
   cors: {
     origin: (origin, cb) => {
@@ -184,6 +187,19 @@ const io = new Server(server, {
     methods: ["GET", "POST"],
     credentials: true,
   },
+  // Only handle socket.io upgrade requests — not SSE routes
+  allowEIO3: true,
+});
+
+// Prevent Socket.IO from intercepting SSE connections on /smilebaba/updates.
+// Without this guard, Socket.IO's "upgrade" event fires on any HTTP upgrade
+// header, returning 426 to the EventSource client.
+server.on("upgrade", (req, socket, head) => {
+  if (req.url && req.url.startsWith("/smilebaba/updates")) {
+    // SSE doesn't use WebSocket — destroy the upgrade attempt
+    socket.destroy();
+  }
+  // All other upgrades (Socket.IO) are handled by the io engine automatically
 });
 
 registerSocketHandlers(io);

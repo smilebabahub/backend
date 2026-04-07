@@ -22,8 +22,7 @@ export const getOverview = async (req, res) => {
       totalAdmins,
       totalAds,
       totalMarketers,
-      revenueGHS,
-      revenueNGN,
+      revenueAgg,
       recentUsers,
       recentPurchases,
     ] = await Promise.all([
@@ -33,21 +32,22 @@ export const getOverview = async (req, res) => {
       Ad.countDocuments({ isActive: true }),
       Marketer.countDocuments({ isActive: true }),
 
-      // Revenue — successful purchases only
+      // Revenue — all successful purchases grouped by currency and type
       Purchase.aggregate([
-        { $match: { status: "successful", currency: "GHS" } },
-        { $group: { _id: null, total: { $sum: "$amount" } } },
-      ]),
-      Purchase.aggregate([
-        { $match: { status: "successful", currency: "NGN" } },
-        { $group: { _id: null, total: { $sum: "$amount" } } },
+        { $match: { status: "successful" } },
+        {
+          $group: {
+            _id:   { currency: "$currency", type: { $ifNull: ["$type", "subscription"] } },
+            total: { $sum: "$amount" },
+          },
+        },
       ]),
 
       // Last 5 signups
       User.find()
         .sort({ createdAt: -1 })
         .limit(5)
-        .select("username email role createdAt")
+        .select("username email role country createdAt")
         .lean(),
 
       // Last 5 successful payments
@@ -55,9 +55,20 @@ export const getOverview = async (req, res) => {
         .sort({ createdAt: -1 })
         .limit(5)
         .populate("user", "username email")
-        .select("title amount currency createdAt user")
+        .select("title amount currency type createdAt user")
         .lean(),
     ]);
+
+    // Parse aggregation into separate buckets
+    let subGHS = 0, subNGN = 0, boostGHS = 0, boostNGN = 0;
+    for (const row of revenueAgg) {
+      const cur   = row._id.currency;
+      const type  = row._id.type;
+      if (cur === "GHS" && type === "subscription") subGHS   = row.total;
+      if (cur === "NGN" && type === "subscription") subNGN   = row.total;
+      if (cur === "GHS" && type === "boost")        boostGHS = row.total;
+      if (cur === "NGN" && type === "boost")        boostNGN = row.total;
+    }
 
     res.status(200).json({
       stats: {
@@ -66,8 +77,14 @@ export const getOverview = async (req, res) => {
         totalAdmins,
         totalAds,
         totalMarketers,
-        revenueGHS: revenueGHS[0]?.total ?? 0,
-        revenueNGN: revenueNGN[0]?.total ?? 0,
+        // Total revenue = subscriptions + boosts
+        revenueGHS:     subGHS + boostGHS,
+        revenueNGN:     subNGN + boostNGN,
+        // Breakdown
+        subRevenueGHS:  subGHS,
+        subRevenueNGN:  subNGN,
+        boostRevenueGHS:boostGHS,
+        boostRevenueNGN:boostNGN,
       },
       recentUsers,
       recentPurchases,
@@ -459,51 +476,66 @@ export const sendAdminEmail = async (req, res) => {
 };
 
 // ── POST /admin/email/bulk — bulk email to vendors, guests, or marketers ──
+//
+// Gmail SMTP limits:
+//   Free accounts:    500 emails / day, ~20/min before throttling
+//   Workspace:       2000 emails / day, ~100/min
+//
+// Strategy: send ONE email every 3 s (20/min) so we never trigger the 421
+// temporary block. For 312 recipients that's ~16 minutes — perfectly fine
+// since this runs async after the 202 response.
 export const sendBulkEmail = async (req, res) => {
-  // Respond immediately — bulk send is async
+  // Respond immediately — bulk send runs fully async
   res.status(202).json({ message: "Bulk email job started" });
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // One email every 3 000 ms = 20 / min — safely under Gmail's threshold
+  const DELAY_MS = 3_000;
 
   try {
     const { audience, country, subject, message } = req.body;
-    // audience: "vendors" | "users" | "marketers" | "all"
-
     const { sendAdminDirectEmail } = await import("../lib/emailService.js");
+
     let recipients = [];
 
     if (audience === "marketers") {
-      const filter = { isActive: true };
-      recipients = await Marketer.find(filter).select("email name").lean();
-      await Promise.allSettled(
-        recipients.map((m) =>
-          sendAdminDirectEmail({ to: m.email, name: m.name, subject, message })
-        )
-      );
+      recipients = await Marketer.find({ isActive: true })
+        .select("email name").lean();
     } else {
       const filter = {};
-      if (audience === "vendors") filter.role = "vendor";
-      else if (audience === "users") filter.role = { $in: ["guest", "vendor"] };
+      if (audience === "vendors")      filter.role = "vendor";
+      else if (audience === "users")   filter.role = { $in: ["guest", "vendor"] };
       // "all" — no role filter
       if (country) filter.country = country;
-
       recipients = await User.find(filter).select("email username").lean();
-      // Send in batches of 50 to avoid overwhelming the SMTP server
-      const BATCH = 50;
-      for (let i = 0; i < recipients.length; i += BATCH) {
-        const batch = recipients.slice(i, i + BATCH);
-        await Promise.allSettled(
-          batch.map((u) =>
-            sendAdminDirectEmail({ to: u.email, name: u.username, subject, message })
-          )
-        );
-        // Small delay between batches
-        if (i + BATCH < recipients.length) {
-          await new Promise((r) => setTimeout(r, 1000));
-        }
-      }
     }
 
-    console.log(`[bulk email] Sent to ${recipients.length} recipients — subject: "${subject}"`);
+    console.log(
+      `[bulk email] Starting job: ${recipients.length} recipients, ` +
+      `subject: "${subject}", delay: ${DELAY_MS}ms`
+    );
+
+    let sent = 0, failed = 0;
+
+    for (const r of recipients) {
+      const name  = r.name ?? r.username ?? "there";
+      const email = r.email;
+      try {
+        await sendAdminDirectEmail({ to: email, name, subject, message });
+        sent++;
+      } catch (err) {
+        failed++;
+        console.error(`[bulk email] Failed for ${email}:`, err.message);
+      }
+      // Throttle — one email per DELAY_MS
+      await sleep(DELAY_MS);
+    }
+
+    console.log(
+      `[bulk email] Done — sent: ${sent}, failed: ${failed} / ${recipients.length} total`
+    );
   } catch (err) {
-    console.error("sendBulkEmail error:", err);
+    console.error("[bulk email] Job error:", err);
   }
 };
