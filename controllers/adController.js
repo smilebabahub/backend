@@ -205,32 +205,44 @@ export const getAds = async (req, res) => {
     // Frontend always sends country (resolved from user/guest/fallback),
     // but if somehow it's missing we still return useful results.
     const resolvedCountry = String(country || "").trim() || "Ghana";
+    const now  = new Date();
+    const skip = (Number(page) - 1) * Number(limit);
+    const lim  = Number(limit);
 
-    const now   = new Date();
-    const skip  = (Number(page) - 1) * Number(limit);
-    const lim   = Number(limit);
+    // ── Build filter conditions ─────────────────────────────────────────────
+    // All conditions collected into $and so multiple $or clauses don't clobber each other.
+    const andClauses = [];
 
-    // ── Shared location + category filters ─────────────────────────────────
-    // location.country: match exact OR missing/empty — ads without a country
-    // field set (older records) are shown in both country feeds.
-    const countryFilter = resolvedCountry
-      ? {
-          $or: [
-            { "location.country": resolvedCountry },
-            { "location.country": { $exists: false } },
-            { "location.country": "" },
-            { "location.country": null },
-          ],
-        }
-      : {};
+    // Country: match exact OR missing/empty (older ads without location.country)
+    andClauses.push({
+      $or: [
+        { "location.country": resolvedCountry     },
+        { "location.country": { $exists: false }  },
+        { "location.country": ""                  },
+        { "location.country": null                },
+      ],
+    });
+
+    // Moderation: approved, no moderation field (old records), or pending-but-active.
+    // isActive:true is the primary ground truth — trust it even if status says pending.
+    andClauses.push({
+      $or: [
+        { "moderation.status": "approved"              },
+        { "moderation.status": { $exists: false }      },
+        { "moderation.status": null                    },
+        { "moderation.status": ""                      },
+        { "moderation.status": "pending", isActive: true },
+      ],
+    });
 
     const baseFilter = {
       isActive: true,
       isSold:   false,
       isPaused: false,
-      ...countryFilter,
+      $and: andClauses,
     };
 
+    // Optional field filters (flat — no $or conflict)
     if (region)     baseFilter["location.region"]  = { $regex: region, $options: "i" };
     if (city)       baseFilter["location.city"]    = { $regex: city,   $options: "i" };
     if (category)   baseFilter["category.main"]    = category;
@@ -240,35 +252,37 @@ export const getAds = async (req, res) => {
     if (negotiable) baseFilter.negotiable          = negotiable;
     if (currency)   baseFilter["price.currency"]   = currency;
     if (search)     baseFilter.$text               = { $search: search };
-
     if (minPrice || maxPrice) {
       baseFilter["price.amount"] = {};
       if (minPrice) baseFilter["price.amount"].$gte = Number(minPrice);
       if (maxPrice) baseFilter["price.amount"].$lte = Number(maxPrice);
     }
 
-    // ── Active filter: not expired ──────────────────────────────────────────
+    // ── Active filter: adds expiry condition to $and ─────────────────────────
     const activeFilter = {
       ...baseFilter,
-      $or: [
-        { expiresAt: { $gt: now } },
-        { expiresAt: null },
-        { expiresAt: { $exists: false } },  // ads without expiry are always active
+      $and: [
+        ...andClauses,
+        {
+          $or: [
+            { expiresAt: { $gt: now }        },
+            { expiresAt: null                 },
+            { expiresAt: { $exists: false }   },
+          ],
+        },
       ],
     };
 
-    // ── Expired filter: expired within the last 30 days ────────────────────
-    // Note: expired ads may have isActive:true OR isActive:false depending on
-    // whether the cron job has run — query both.
+    // ── Expired filter: expired in last 30 days, any isActive state ─────────
     const thirtyDaysAgo = new Date(now - 30 * 86400000);
     const expiredFilter = {
       ...baseFilter,
-      isActive: { $in: [true, false] },     // show regardless of cron update
-      isSold:   false,
+      isActive:  { $in: [true, false] },
+      isSold:    false,
       expiresAt: { $lte: now, $gte: thirtyDaysAgo },
     };
 
-    // ── Sort options (applied to active ads only; expired always sort newest) ─
+    // ── Sort ─────────────────────────────────────────────────────────────────
     const sortMap = {
       newest:    { "boost.isBoosted": -1, createdAt: -1 },
       oldest:    { createdAt: 1 },

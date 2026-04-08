@@ -13,8 +13,9 @@ import { publish, CHANNELS } from "../lib/redis.js";
 import { sendSubscriptionEmails } from "../lib/emailService.js";
 import { pushToUser } from "../lib/socketHandler.js";
 
-
 const REFERRAL_DISCOUNT = 0.15;
+
+
 
 // Plan tier order — higher index = higher plan
 const PLAN_TIERS = ["Basic", "standard", "popular", "premium"];
@@ -336,12 +337,13 @@ export const initializePayment = async (req, res) => {
     // ── Paid plan: create pending purchase + Flutterwave link ─────────────────
     const tx_ref = `smilebaba-${countryCode.toLowerCase()}-${userId}-${Date.now()}`;
 
-    // Clean up any stale pending purchases for same user+plan (prevents duplicate rows)
+    // Delete ALL pending subscription purchases for this user — not just same plan.
+    // When a user changes their mind mid-checkout (popular → standard), the old
+    // pending record must be removed or it accumulates forever.
     await Purchase.deleteMany({
       user: userId,
       status: "pending",
-      planId,
-      billingCycle,
+      type: { $in: ["subscription", null, undefined] }, // only subscriptions, not boosts
     });
 
     await Purchase.create({
@@ -605,7 +607,7 @@ export const getPurchaseHistory = async (req, res) => {
     const [purchases, user] = await Promise.all([
       Purchase.find({
         user: userId,
-        status: "successful",
+        status: "successful", // never show pending/failed records in history
       })
         .sort({ createdAt: -1 })
         .select(
@@ -614,6 +616,14 @@ export const getPurchaseHistory = async (req, res) => {
         .lean(),
       User.findById(userId).select("subscription role").lean(),
     ]);
+
+    // Clean up stale pending purchases older than 24 h — these are abandoned
+    // checkout sessions that will never complete. Run async, non-blocking.
+    Purchase.deleteMany({
+      user: userId,
+      status: "pending",
+      createdAt: { $lt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+    }).catch(() => {});
 
     // Deduplicate by txRef
     const seen = new Set();
