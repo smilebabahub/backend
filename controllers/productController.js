@@ -1,65 +1,86 @@
 // controllers/productController.js
 import Ad from "../models/adModel.js";
-import {
-  getFeedCache, setFeedCache, feedCacheKey,
-} from "../lib/redis.js";
+import { getFeedCache, setFeedCache, feedCacheKey } from "../lib/redis.js";
 
 // ── GET /products — public feed ────────────────────────────────────────────
 export const getProducts = async (req, res) => {
   try {
     const {
-      category, sub, country, search,
-      featured, minPrice, maxPrice, currency,
-      sort = "newest", page = 1, limit = 20,
+      category,
+      sub,
+      country,
+      search,
+      featured,
+      minPrice,
+      maxPrice,
+      currency,
+      sort = "newest",
+      page = 1,
+      limit = 20,
     } = req.query;
 
-    const resolvedCountry = (country )?.trim() || "Ghana";
+    // Always resolve country — never let an empty string reach MongoDB
+    const resolvedCountry = (country || "").trim() || "Ghana";
 
-    // ── Redis cache — only for simple unconstrained browsing feeds ───────────
-    // Skip cache for search / price-filter / sub-category (too many variants)
-    const isCacheable = !search && !minPrice && !maxPrice && !sub && !featured && !currency;
+    // ── Redis cache — skip for searches / price filters (too many variants) ──
+    const isCacheable =
+      !search && !minPrice && !maxPrice && !sub && !featured && !currency;
     const cKey = isCacheable
-      ? feedCacheKey({ country: resolvedCountry, category: category , sort: sort , page, limit })
+      ? feedCacheKey({
+          country: resolvedCountry,
+          category: category || "all",
+          sort,
+          page,
+          limit,
+        })
       : null;
 
     if (cKey) {
       const cached = await getFeedCache(cKey);
-      if (cached) {
-        return res.status(200).json({ ...cached, fromCache: true });
-      }
+      if (cached) return res.status(200).json({ ...cached, fromCache: true });
     }
 
+    // location.country: match exact OR missing/empty — older ads without a
+    // country field are shown in both country feeds rather than disappearing.
     const filter = {
-      "location.country": resolvedCountry,
+      $or: [
+        { "location.country": resolvedCountry },
+        { "location.country": { $exists: false } },
+        { "location.country": "" },
+        { "location.country": null },
+      ],
       isActive: true,
-      isSold:   false,
+      isSold: false,
       isPaused: false,
     };
 
-    if (category)             filter["category.main"]     = category;
-    if (sub)                  filter["category.sub"]      = sub;
-    if (featured === "true")  filter.isFeatured           = true;
-    if (search)               filter.$text                = { $search: search };
+    if (category) filter["category.main"] = category;
+    if (sub) filter["category.sub"] = sub;
+    if (featured === "true") filter.isFeatured = true;
+    if (search) filter.$text = { $search: search };
+
     if (minPrice || maxPrice) {
       filter["price.amount"] = {};
       if (minPrice) filter["price.amount"].$gte = Number(minPrice);
       if (maxPrice) filter["price.amount"].$lte = Number(maxPrice);
     }
+
     if (currency) filter["price.currency"] = currency;
 
     const sortMap = {
-      newest:     { "boost.isBoosted": -1, createdAt: -1 },
-      oldest:     { createdAt: 1 },
-      price_asc:  { "price.amount": 1 },
+      newest: { "boost.isBoosted": -1, createdAt: -1 },
+      oldest: { createdAt: 1 },
+      price_asc: { "price.amount": 1 },
       price_desc: { "price.amount": -1 },
-      popular:    { views: -1 },
+      popular: { views: -1 },
     };
 
-    const skip  = (Number(page) - 1) * Number(limit);
+    const skip = (Number(page) - 1) * Number(limit);
+
     const [total, docs] = await Promise.all([
       Ad.countDocuments(filter),
       Ad.find(filter)
-        .sort(sortMap[sort] ?? sortMap.newest)
+        .sort(sortMap[sort] || sortMap.newest)
         .skip(skip)
         .limit(Number(limit))
         .populate("postedBy", "username profilePicture phone")
@@ -71,14 +92,14 @@ export const getProducts = async (req, res) => {
       products,
       meta: {
         total,
-        page:       Number(page),
-        limit:      Number(limit),
+        page: Number(page),
+        limit: Number(limit),
         totalPages: Math.ceil(total / Number(limit)),
-        hasNext:    skip + docs.length < total,
+        hasNext: skip + docs.length < total,
       },
     };
 
-    // Write to cache (non-blocking — never delay the response)
+    // Write to cache non-blocking — never delay the response
     if (cKey) setFeedCache(cKey, result).catch(() => {});
 
     res.status(200).json(result);
@@ -89,28 +110,29 @@ export const getProducts = async (req, res) => {
 };
 
 // ── GET /products/my — vendor's own listings ───────────────────────────────
-// Response: { products: Product[], meta: {...} }
 export const getMyProducts = async (req, res) => {
   try {
     const userId = req.user.userId;
     const { page = 1, limit = 20 } = req.query;
+    const skip = (Number(page) - 1) * Number(limit);
 
-    const skip  = (Number(page) - 1) * Number(limit);
-    const total = await Ad.countDocuments({ postedBy: userId });
-    const docs  = await Ad.find({ postedBy: userId })
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(Number(limit))
-      .lean();
+    const [total, docs] = await Promise.all([
+      Ad.countDocuments({ postedBy: userId }),
+      Ad.find({ postedBy: userId })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(Number(limit))
+        .lean(),
+    ]);
 
     res.status(200).json({
       products: docs.map(normaliseProduct),
       meta: {
         total,
-        page:       Number(page),
-        limit:      Number(limit),
+        page: Number(page),
+        limit: Number(limit),
         totalPages: Math.ceil(total / Number(limit)),
-        hasNext:    skip + docs.length < total,
+        hasNext: skip + docs.length < total,
       },
     });
   } catch (error) {
@@ -120,7 +142,6 @@ export const getMyProducts = async (req, res) => {
 };
 
 // ── GET /products/:id ──────────────────────────────────────────────────────
-// Response: { product: Product }
 export const getProductById = async (req, res) => {
   try {
     const doc = await Ad.findById(req.params.id)
@@ -129,7 +150,6 @@ export const getProductById = async (req, res) => {
 
     if (!doc) return res.status(404).json({ message: "Product not found" });
 
-    // Increment views
     Ad.findByIdAndUpdate(req.params.id, { $inc: { views: 1 } }).exec();
 
     res.status(200).json({ product: normaliseProduct(doc) });
@@ -155,41 +175,39 @@ export const deleteProductById = async (req, res) => {
   }
 };
 
-// ── Normaliser — maps Ad document to the Product shape ─────────────────────
-// Frontend's Product type expects: _id, title, images[], price (number),
-// currency, location, seller, rating, views, isFeatured, createdAt
+// ── Normaliser — maps Ad document → Product shape expected by frontend ─────
 function normaliseProduct(doc) {
   return {
-    _id:         doc._id,
-    id:          doc._id,                            // legacy alias
-    title:       doc.title,
+    _id: doc._id,
+    id: doc._id,
+    title: doc.title,
     description: doc.description,
-    category:    doc.category?.main ?? "",
-    subcategory: doc.category?.sub  ?? "",
+    category: doc.category?.main ?? "",
+    subcategory: doc.category?.sub ?? "",
     images: (doc.images ?? []).map((img) =>
-      typeof img === "string" ? img : img.url ?? ""
+      typeof img === "string" ? img : (img.url ?? ""),
     ),
-    price:       doc.price?.amount  ?? 0,
-    currency:    doc.price?.currency ?? "GHS",
-    priceDisplay:doc.price?.display  ?? null,
+    price: doc.price?.amount ?? 0,
+    currency: doc.price?.currency ?? "GHS",
+    priceDisplay: doc.price?.display ?? null,
     location: {
-      country:    doc.location?.country,
-      countryCode:doc.location?.countryCode,
-      region:     doc.location?.region,
-      city:       doc.location?.city,
-      address:    doc.location?.address,
+      country: doc.location?.country,
+      countryCode: doc.location?.countryCode,
+      region: doc.location?.region,
+      city: doc.location?.city,
+      address: doc.location?.address,
     },
     seller: {
-      _id:            doc.postedBy?._id ?? doc.postedBy,
-      name:           doc.postedBy?.username,
-      username:       doc.postedBy?.username,
+      _id: doc.postedBy?._id ?? doc.postedBy,
+      name: doc.postedBy?.username,
+      username: doc.postedBy?.username,
       profilePicture: doc.postedBy?.profilePicture,
-      phone:          doc.postedBy?.phone,
+      phone: doc.postedBy?.phone,
     },
-    rating:    null,    // add your own rating model if needed
-    views:     doc.views     ?? 0,
-    isFeatured:doc.isFeatured ?? false,
-    isActive:  doc.isActive  ?? true,
+    rating: null,
+    views: doc.views ?? 0,
+    isFeatured: doc.isFeatured ?? false,
+    isActive: doc.isActive ?? true,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   };
