@@ -13,7 +13,8 @@ import { publish, CHANNELS } from "../lib/redis.js";
 import { sendSubscriptionEmails } from "../lib/emailService.js";
 import { pushToUser } from "../lib/socketHandler.js";
 
-const REFERRAL_DISCOUNT = 0.2;
+
+const REFERRAL_DISCOUNT = 0.15;
 
 // Plan tier order — higher index = higher plan
 const PLAN_TIERS = ["Basic", "standard", "popular", "premium"];
@@ -59,18 +60,27 @@ async function activateSubscription({
     billingCycle === "monthly" ? "Monthly" : "Yearly"
   } Plan`;
 
-  await User.findByIdAndUpdate(userId, {
-    role: "vendor",
-    subscription: {
-      plan: planId,
-      billingCycle,
-      price: payment.amount,
-      currency: payment.currency,
-      startedAt: now,
-      expiresAt,
-      referredBy: marketerId ?? null,
+  // Update subscription — preserve admin role if already set
+  await User.findByIdAndUpdate(userId, [
+    {
+      $set: {
+        role: {
+          $cond: [{ $eq: ["$role", "admin"] }, "admin", "vendor"],
+        },
+        isSubscribed: true,
+        subscription: {
+          plan: planId,
+          billingCycle,
+          price: payment.amount,
+          currency: payment.currency,
+          startedAt: now,
+          expiresAt,
+          referredBy: marketerId ?? null,
+          status: "active",
+        },
+      },
     },
-  });
+  ]);
 
   // Upsert on txRef — safe to call twice (verify + webhook)
   await Purchase.findOneAndUpdate(
@@ -620,11 +630,14 @@ export const getPurchaseHistory = async (req, res) => {
       (p) => p.type === "subscription" || p.planId === user?.subscription?.plan,
     );
 
-    if (
-      !hasPurchaseRecord &&
+    // Include admin users who have an active subscription (site owners who are also vendors)
+    const hasActiveSubscription =
       user?.subscription?.plan &&
-      user.role === "vendor"
-    ) {
+      user.subscription.plan !== "Basic" &&
+      user.subscription.expiresAt &&
+      new Date(user.subscription.expiresAt) > new Date();
+
+    if (!hasPurchaseRecord && hasActiveSubscription) {
       deduped.unshift({
         _id: "synth-active",
         title: `${user.subscription.plan} Plan (active)`,

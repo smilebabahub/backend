@@ -4,6 +4,7 @@ import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import nodemailer from "nodemailer";
 import { sendRegistrationEmails } from "../lib/emailService.js";
+import { validateEmail } from "../lib/validateEmail.js";
 import { blacklistToken } from "../lib/redis.js";
 import {
   generateAccessToken,
@@ -102,11 +103,12 @@ const isAdminEmail = (email = "") => ADMIN_EMAILS.has(email.toLowerCase());
 //   This ensures logged-in Nigerian users always get NGN even if their DB
 //   loginHistory stored "Ghana" during a previous bad geo detection.
 const serializeUser = (user, liveCountry) => {
-  const lastLogin = user.loginHistory?.[user.loginHistory.length - 1];
-  const admin = isAdminEmail(user.email);
+  const obj = user.toObject ? user.toObject() : user;
+  const lastLogin = obj.loginHistory?.[obj.loginHistory.length - 1];
+  const admin = isAdminEmail(obj.email);
 
-  // Priority: explicit override (admin switch) > live request country > DB stored > fallback
-  const rawCountry = liveCountry ?? lastLogin?.country ?? "";
+  // Country priority: explicit override > live request > DB stored > fallback
+  const rawCountry = liveCountry ?? lastLogin?.country ?? obj.country ?? "";
   const country = rawCountry.toLowerCase().includes("nigeria")
     ? "Nigeria"
     : rawCountry.toLowerCase().includes("ghana")
@@ -115,23 +117,91 @@ const serializeUser = (user, liveCountry) => {
 
   const { currency, symbol, locale } = getCurrencyFromCountry(country);
 
+  // Subscription: read from nested object, normalise active status
+  const sub = obj.subscription ?? null;
+  const subActive = sub?.expiresAt
+    ? new Date(sub.expiresAt) > new Date()
+    : false;
+
   return {
-    _id: user._id,
-    username: user.username,
-    email: user.email,
-    phone: user.phone,
-    role: admin ? "admin" : user.role,
+    // ── Auth ──────────────────────────────────────────────────────────────
+    _id: obj._id,
+    username: obj.username,
+    email: obj.email,
+    phone: obj.phone,
+    role: admin ? "admin" : obj.role,
     isAdmin: admin,
-    city: user.city,
-    state: user.state,
-    profilePicture: user.profilePicture,
-    cartItems: user.cartItems,
-    subscription: user.subscription ?? null,
+
+    // ── Profile ───────────────────────────────────────────────────────────
+    profilePicture: obj.profilePicture ?? "",
+    gender: obj.gender ?? "",
+    dateOfBirth: obj.dateOfBirth ?? "",
+    bio: obj.bio ?? "",
+    city: obj.city ?? "",
+    state: obj.state ?? "",
     country,
     currency,
     symbol,
     locale,
     detectedCountry: lastLogin?.country ?? "",
+
+    // ── Store ─────────────────────────────────────────────────────────────
+    storeName: obj.storeName ?? "",
+    storeSlug: obj.storeSlug ?? "",
+    storeCategory: obj.storeCategory ?? "",
+    storeDescription: obj.storeDescription ?? "",
+    storeEmail: obj.storeEmail ?? "",
+    storeWebsite: obj.storeWebsite ?? "",
+    storePhone: obj.storePhone ?? "",
+    storeBanner: obj.storeBanner ?? "",
+    storeLogo: obj.storeLogo ?? "",
+    businessType: obj.businessType ?? "individual",
+
+    // ── Social ────────────────────────────────────────────────────────────
+    instagram: obj.instagram ?? "",
+    facebook: obj.facebook ?? "",
+    whatsapp: obj.whatsapp ?? "",
+
+    // ── Store policies ────────────────────────────────────────────────────
+    returnPolicy: obj.returnPolicy ?? "",
+    deliveryPolicy: obj.deliveryPolicy ?? "",
+    exchangePolicy: obj.exchangePolicy ?? "",
+
+    // ── Operating hours ───────────────────────────────────────────────────
+    operatingHours: obj.operatingHours ?? {},
+
+    // ── Subscription ──────────────────────────────────────────────────────
+    subscription: sub,
+    isSubscribed: subActive,
+
+    // ── Payout / payments ─────────────────────────────────────────────────
+    payoutMethod: obj.payoutMethod ?? "momo",
+    momoDetails: obj.momoDetails ?? {},
+    bankDetails: obj.bankDetails ?? {},
+    taxInfo: obj.taxInfo ?? {},
+    payoutSchedule: obj.payoutSchedule ?? {},
+
+    // ── Shipping ──────────────────────────────────────────────────────────
+    deliveryZones: obj.deliveryZones ?? [],
+    deliveryPricing: obj.deliveryPricing ?? {},
+    dispatchTime: obj.dispatchTime ?? "24",
+    packagingNotes: obj.packagingNotes ?? "",
+
+    // ── KYC ───────────────────────────────────────────────────────────────
+    kycStatus: obj.kycStatus ?? {},
+    kycDocType: obj.kycDocType ?? "",
+    kycDocNumber: obj.kycDocNumber ?? "",
+    kycDocExpiry: obj.kycDocExpiry ?? "",
+    kycFrontUrl: obj.kycFrontUrl ?? "",
+    kycBackUrl: obj.kycBackUrl ?? "",
+    kycBizUrl: obj.kycBizUrl ?? "",
+    kycBizRegNo: obj.kycBizRegNo ?? "",
+
+    // ── Notifications ─────────────────────────────────────────────────────
+    notifications: obj.notifications ?? {},
+
+    // ── Misc ──────────────────────────────────────────────────────────────
+    cartItems: obj.cartItems ?? [],
   };
 };
 
@@ -171,7 +241,23 @@ export const register = async (req, res) => {
     const { username, email, password, phone } = req.body;
 
     if (!username || !email || !password || !phone) {
-      return res.status(400).json({ message: "Required fields missing" });
+      return res.status(400).json({ message: "All fields are required" });
+    }
+
+    // Validate email — format, disposable domain, DNS MX record
+    const emailCheck = await validateEmail(email);
+    if (!emailCheck.valid) {
+      return res.status(400).json({ message: emailCheck.reason });
+    }
+
+    // Block duplicate emails early (before hashing password)
+    const existing = await User.findOne({
+      email: email.trim().toLowerCase(),
+    }).lean();
+    if (existing) {
+      return res
+        .status(409)
+        .json({ message: "An account with this email already exists" });
     }
 
     const ip = resolveClientIP(req);
@@ -529,6 +615,7 @@ export const updateProfile = async (req, res) => {
   try {
     const userId = req.user.userId;
     const {
+      // Personal profile
       username,
       phone,
       city,
@@ -536,18 +623,36 @@ export const updateProfile = async (req, res) => {
       bio,
       gender,
       dateOfBirth,
+      profilePicture, // ← Cloudinary URL from avatar upload
+      // Store identity
       storeName,
       storeSlug,
       storeCategory,
       storeDescription,
       storeEmail,
       storeWebsite,
+      storePhone,
+      businessType,
+      storeBanner,
+      storeLogo, // ← Cloudinary URLs from StoreTab
+      // Social
       instagram,
       facebook,
       whatsapp,
+      // Store policies
       returnPolicy,
       deliveryPolicy,
       exchangePolicy,
+      // Operating hours (full object from StoreTab)
+      operatingHours,
+      // KYC fields (from KycTab)
+      kycDocType,
+      kycDocNumber,
+      kycDocExpiry,
+      kycFrontUrl,
+      kycBackUrl,
+      kycBizUrl,
+      kycBizRegNo,
     } = req.body;
 
     const allowed = {
@@ -558,28 +663,42 @@ export const updateProfile = async (req, res) => {
       bio,
       gender,
       dateOfBirth,
+      profilePicture,
       storeName,
       storeSlug,
       storeCategory,
       storeDescription,
       storeEmail,
       storeWebsite,
+      storePhone,
+      businessType,
+      storeBanner,
+      storeLogo,
       instagram,
       facebook,
       whatsapp,
       returnPolicy,
       deliveryPolicy,
       exchangePolicy,
+      operatingHours,
+      kycDocType,
+      kycDocNumber,
+      kycDocExpiry,
+      kycFrontUrl,
+      kycBackUrl,
+      kycBizUrl,
+      kycBizRegNo,
     };
-    // Remove undefined fields
-    Object.keys(allowed).forEach(
-      (k) => allowed[k] === undefined && delete allowed[k],
-    );
+
+    // Remove undefined so we never overwrite existing values with undefined
+    Object.keys(allowed).forEach((k) => {
+      if (allowed[k] === undefined) delete allowed[k];
+    });
 
     const user = await User.findByIdAndUpdate(
       userId,
       { $set: allowed },
-      { new: true, runValidators: true },
+      { new: true, runValidators: false }, // runValidators:false — partial update safe
     ).select("-password -loginHistory");
 
     if (!user) return res.status(404).json({ message: "User not found" });
@@ -631,9 +750,19 @@ export const updateNotifications = async (req, res) => {
     const userId = req.user.userId;
     const { notifications } = req.body;
 
-    await User.findByIdAndUpdate(userId, { $set: { notifications } });
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { $set: { notifications } },
+      { new: true },
+    ).select("-password -loginHistory");
+    if (!user) return res.status(404).json({ message: "User not found" });
 
-    res.status(200).json({ message: "Notification preferences saved" });
+    res
+      .status(200)
+      .json({
+        message: "Notification preferences saved",
+        user: serializeUser(user),
+      });
   } catch (err) {
     res.status(500).json({ message: "Failed to save notifications" });
   }
@@ -646,11 +775,24 @@ export const updatePaymentDetails = async (req, res) => {
     const { payoutMethod, momoDetails, bankDetails, taxInfo, payoutSchedule } =
       req.body;
 
-    await User.findByIdAndUpdate(userId, {
-      $set: { payoutMethod, momoDetails, bankDetails, taxInfo, payoutSchedule },
-    });
+    const user = await User.findByIdAndUpdate(
+      userId,
+      {
+        $set: {
+          payoutMethod,
+          momoDetails,
+          bankDetails,
+          taxInfo,
+          payoutSchedule,
+        },
+      },
+      { new: true },
+    ).select("-password -loginHistory");
+    if (!user) return res.status(404).json({ message: "User not found" });
 
-    res.status(200).json({ message: "Payment details saved" });
+    res
+      .status(200)
+      .json({ message: "Payment details saved", user: serializeUser(user) });
   } catch (err) {
     res.status(500).json({ message: "Failed to save payment details" });
   }
@@ -663,11 +805,18 @@ export const updateShipping = async (req, res) => {
     const { deliveryZones, deliveryPricing, dispatchTime, packagingNotes } =
       req.body;
 
-    await User.findByIdAndUpdate(userId, {
-      $set: { deliveryZones, deliveryPricing, dispatchTime, packagingNotes },
-    });
+    const user = await User.findByIdAndUpdate(
+      userId,
+      {
+        $set: { deliveryZones, deliveryPricing, dispatchTime, packagingNotes },
+      },
+      { new: true },
+    ).select("-password -loginHistory");
+    if (!user) return res.status(404).json({ message: "User not found" });
 
-    res.status(200).json({ message: "Shipping settings saved" });
+    res
+      .status(200)
+      .json({ message: "Shipping settings saved", user: serializeUser(user) });
   } catch (err) {
     res.status(500).json({ message: "Failed to save shipping settings" });
   }

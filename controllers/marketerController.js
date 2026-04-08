@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import Marketer from "../models/marketerModel.js";
 import { sendMarketerRegistrationEmails } from "../lib/emailService.js";
+import { validateEmail } from "../lib/validateEmail.js";
 import {
   cacheReferralCode,
   getReferralCode,
@@ -25,10 +26,18 @@ export const registerMarketer = async (req, res) => {
     const { name, email, phone, password } = req.body;
 
     if (!name || !email || !phone || !password) {
-      return res.status(400).json({ message: "All fields required" });
+      return res.status(400).json({ message: "All fields are required" });
     }
 
-    const exists = await Marketer.findOne({ email });
+    // Validate email — format, disposable domain, DNS MX record
+    const emailCheck = await validateEmail(email);
+    if (!emailCheck.valid) {
+      return res.status(400).json({ message: emailCheck.reason });
+    }
+
+    const exists = await Marketer.findOne({
+      email: email.trim().toLowerCase(),
+    });
     if (exists) {
       return res.status(409).json({ message: "Email already registered" });
     }

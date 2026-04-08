@@ -11,8 +11,8 @@ import { bustFeedCache } from "../lib/redis.js";
 
 /** Calculate listing expiry date based on vendor's subscription plan */
 function getExpiryDate(planId) {
-  const daysMap = { Basic: 30, standard: 30, popular: 30, premium: 30 };
-  const days = daysMap[planId] ?? 30;
+  const daysMap = { Basic: 14, standard: 30, popular: 30, premium: 30 };
+  const days = daysMap[planId] ?? 3;
   return new Date(Date.now() + days * 86400000);
 }
 
@@ -304,63 +304,102 @@ export const getAds = async (req, res) => {
     // but if somehow it's missing we still return useful results.
     const resolvedCountry = String(country || "").trim() || "Ghana";
 
-    const filter = {
+    const now = new Date();
+    const skip = (Number(page) - 1) * Number(limit);
+    const lim = Number(limit);
+
+    // ── Shared location + category filters ─────────────────────────────────
+    const baseFilter = {
       isActive: true,
       isSold: false,
       isPaused: false,
       "location.country": resolvedCountry,
-      $or: [{ expiresAt: { $gt: new Date() } }, { expiresAt: null }],
     };
 
-    if (region) filter["location.region"] = { $regex: region, $options: "i" };
-    if (city) filter["location.city"] = { $regex: city, $options: "i" };
-    if (category) filter["category.main"] = category;
-    if (sub) filter["category.sub"] = sub;
-    if (leaf) filter["category.leaf"] = leaf;
-    if (condition) filter.condition = condition;
-    if (negotiable) filter.negotiable = negotiable;
+    if (region)
+      baseFilter["location.region"] = { $regex: region, $options: "i" };
+    if (city) baseFilter["location.city"] = { $regex: city, $options: "i" };
+    if (category) baseFilter["category.main"] = category;
+    if (sub) baseFilter["category.sub"] = sub;
+    if (leaf) baseFilter["category.leaf"] = leaf;
+    if (condition) baseFilter.condition = condition;
+    if (negotiable) baseFilter.negotiable = negotiable;
+    if (currency) baseFilter["price.currency"] = currency;
+    if (search) baseFilter.$text = { $search: search };
 
     if (minPrice || maxPrice) {
-      filter["price.amount"] = {};
-      if (minPrice) filter["price.amount"].$gte = Number(minPrice);
-      if (maxPrice) filter["price.amount"].$lte = Number(maxPrice);
-    }
-    if (currency) filter["price.currency"] = currency;
-
-    // Full-text search
-    if (search) {
-      filter.$text = { $search: search };
+      baseFilter["price.amount"] = {};
+      if (minPrice) baseFilter["price.amount"].$gte = Number(minPrice);
+      if (maxPrice) baseFilter["price.amount"].$lte = Number(maxPrice);
     }
 
-    // Sort options
+    // ── Active filter: not expired ──────────────────────────────────────────
+    const activeFilter = {
+      ...baseFilter,
+      $or: [{ expiresAt: { $gt: now } }, { expiresAt: null }],
+    };
+
+    // ── Expired filter: expired within the last 30 days (still relevant) ───
+    const thirtyDaysAgo = new Date(now - 30 * 86400000);
+    const expiredFilter = {
+      ...baseFilter,
+      expiresAt: { $lte: now, $gte: thirtyDaysAgo },
+    };
+
+    // ── Sort options (applied to active ads only; expired always sort newest) ─
     const sortMap = {
       newest: { "boost.isBoosted": -1, createdAt: -1 },
       oldest: { createdAt: 1 },
       price_asc: { "price.amount": 1 },
       price_desc: { "price.amount": -1 },
       popular: { views: -1 },
-      // Boosted ads always float to top within any sort
     };
     const sortQuery = sortMap[sort] ?? sortMap.newest;
 
-    const skip = (Number(page) - 1) * Number(limit);
-    const total = await Ad.countDocuments(filter);
+    // ── Fetch active ads (high priority — paginated normally) ───────────────
+    const [activeAds, activeTotal] = await Promise.all([
+      Ad.find(activeFilter)
+        .sort(sortQuery)
+        .skip(skip)
+        .limit(lim)
+        .populate("postedBy", "username profilePicture")
+        .lean(),
+      Ad.countDocuments(activeFilter),
+    ]);
 
-    const ads = await Ad.find(filter)
-      .sort(sortQuery)
-      .skip(skip)
-      .limit(Number(limit))
-      .populate("postedBy", "username profilePicture")
-      .lean();
+    // ── If active ads fill the page, return them only ───────────────────────
+    // If there's space left on the page, pad with expired ads (low priority)
+    const activeCount = activeAds.length;
+    const remainingSlots = lim - activeCount;
+    let expiredAds = [];
+
+    if (remainingSlots > 0 && skip < activeTotal + 1) {
+      // Only fetch expired padding when we're near the end of active results
+      const expiredSkip = Math.max(0, skip - activeTotal);
+      expiredAds = await Ad.find(expiredFilter)
+        .sort({ expiresAt: -1 }) // most recently expired first
+        .skip(expiredSkip)
+        .limit(remainingSlots)
+        .populate("postedBy", "username profilePicture")
+        .lean();
+    }
+
+    const expiredTotal =
+      remainingSlots > 0 ? await Ad.countDocuments(expiredFilter) : 0;
+
+    const allAds = [...activeAds, ...expiredAds];
+    const total = activeTotal + expiredTotal;
 
     res.status(200).json({
-      ads: ads.map(serializeAd),
+      ads: allAds.map(serializeAd),
       meta: {
         total,
+        activeTotal,
+        expiredTotal,
         page: Number(page),
-        limit: Number(limit),
-        totalPages: Math.ceil(total / Number(limit)),
-        hasNext: skip + ads.length < total,
+        limit: lim,
+        totalPages: Math.ceil(total / lim),
+        hasNext: skip + allAds.length < total,
       },
     });
   } catch (error) {
@@ -640,18 +679,45 @@ export const getMyAds = async (req, res) => {
       .limit(Number(limit))
       .lean();
 
-    // Summary stats
-    const [activeCount, soldCount, pausedCount, totalViews] = await Promise.all(
-      [
-        Ad.countDocuments({ postedBy: userId, isActive: true, isSold: false }),
-        Ad.countDocuments({ postedBy: userId, isSold: true }),
-        Ad.countDocuments({ postedBy: userId, isPaused: true }),
-        Ad.aggregate([
-          { $match: { postedBy: new mongoose.Types.ObjectId(userId) } },
-          { $group: { _id: null, total: { $sum: "$views" } } },
-        ]).then((r) => r[0]?.total ?? 0),
-      ],
-    );
+    const now = new Date();
+
+    // Summary stats — includes expiredCount and expiringSoonCount for dashboard badges
+    const [
+      activeCount,
+      soldCount,
+      pausedCount,
+      expiredCount,
+      expiringSoonCount,
+      totalViews,
+    ] = await Promise.all([
+      Ad.countDocuments({
+        postedBy: userId,
+        isActive: true,
+        isSold: false,
+        isPaused: false,
+        $or: [{ expiresAt: { $gt: now } }, { expiresAt: null }],
+      }),
+      Ad.countDocuments({ postedBy: userId, isSold: true }),
+      Ad.countDocuments({ postedBy: userId, isPaused: true }),
+      // Expired: isActive but expiresAt in the past
+      Ad.countDocuments({
+        postedBy: userId,
+        isActive: true,
+        isSold: false,
+        expiresAt: { $lte: now },
+      }),
+      // Expiring in ≤3 days
+      Ad.countDocuments({
+        postedBy: userId,
+        isActive: true,
+        isSold: false,
+        expiresAt: { $gt: now, $lte: new Date(now.getTime() + 3 * 86400000) },
+      }),
+      Ad.aggregate([
+        { $match: { postedBy: new mongoose.Types.ObjectId(userId) } },
+        { $group: { _id: null, total: { $sum: "$views" } } },
+      ]).then((r) => r[0]?.total ?? 0),
+    ]);
 
     res.status(200).json({
       ads: ads.map(serializeAd),
@@ -661,7 +727,14 @@ export const getMyAds = async (req, res) => {
         limit: Number(limit),
         totalPages: Math.ceil(total / Number(limit)),
       },
-      stats: { activeCount, soldCount, pausedCount, totalViews },
+      stats: {
+        activeCount,
+        soldCount,
+        pausedCount,
+        expiredCount,
+        expiringSoonCount,
+        totalViews,
+      },
     });
   } catch (error) {
     console.error("getMyAds error:", error);
