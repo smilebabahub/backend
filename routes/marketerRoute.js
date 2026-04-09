@@ -47,6 +47,23 @@ router.patch("/payout", authenticateMarketer, updatePayoutDetails);
 // ── Referral code validation (public — vendors call this) ──────────────────
 router.get("/referral/:code/validate", validateReferralCode);
 
+// Look up a marketer by their MongoDB _id — used by the subscription page
+// to display the name of the marketer who referred this user on a free plan.
+router.get("/referral/by-id/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id.match(/^[0-9a-fA-F]{24}$/)) {
+      return res.status(400).json({ message: "Invalid id" });
+    }
+    const Marketer = (await import("../models/marketer.js")).default;
+    const m = await Marketer.findById(id).select("name").lean();
+    if (!m) return res.status(404).json({ message: "Marketer not found" });
+    res.json({ name: m.name });
+  } catch {
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
 // ── SSE: live stats for marketer dashboard ─────────────────────────────────
 router.get("/stream", authenticateMarketer, marketerStatsSSE);
 

@@ -15,8 +15,6 @@ import { pushToUser } from "../lib/socketHandler.js";
 
 const REFERRAL_DISCOUNT = 0.15;
 
-
-
 // Plan tier order — higher index = higher plan
 const PLAN_TIERS = ["Basic", "standard", "popular", "premium"];
 
@@ -38,6 +36,7 @@ async function activateSubscription({
   payment,
   txRef,
   marketerId,
+  freeActivation = false, // true when amount === 0 — skip commission
 }) {
   // Check if this txRef was already processed (idempotency guard)
   const existing = await Purchase.findOne({
@@ -61,27 +60,28 @@ async function activateSubscription({
     billingCycle === "monthly" ? "Monthly" : "Yearly"
   } Plan`;
 
-  // Update subscription — preserve admin role if already set
-  await User.findByIdAndUpdate(userId, [
-    {
-      $set: {
-        role: {
-          $cond: [{ $eq: ["$role", "admin"] }, "admin", "vendor"],
-        },
-        isSubscribed: true,
-        subscription: {
-          plan: planId,
-          billingCycle,
-          price: payment.amount,
-          currency: payment.currency,
-          startedAt: now,
-          expiresAt,
-          referredBy: marketerId ?? null,
-          status: "active",
-        },
+  // Update subscription — preserve admin role if already set.
+  // Fetch current role first to avoid the aggregation pipeline syntax
+  // (findByIdAndUpdate doesn't support array pipelines without extra options).
+  const currentUser = await User.findById(userId).select("role").lean();
+  const newRole = currentUser?.role === "admin" ? "admin" : "vendor";
+
+  await User.findByIdAndUpdate(userId, {
+    $set: {
+      role: newRole,
+      isSubscribed: true,
+      subscription: {
+        plan: planId,
+        billingCycle,
+        price: payment.amount,
+        currency: payment.currency,
+        startedAt: now,
+        expiresAt,
+        referredBy: marketerId ?? null,
+        status: "active",
       },
     },
-  ]);
+  });
 
   // Upsert on txRef — safe to call twice (verify + webhook)
   await Purchase.findOneAndUpdate(
@@ -126,8 +126,9 @@ async function activateSubscription({
   // Push real-time notification to user's bell (if they're online)
   pushToUser(userId, "new_notification", {});
 
-  // Marketer commission — only on first activation (idempotency: check paidOut field)
-  if (marketerId) {
+  // Marketer commission — skip for free plan activations.
+  // Commission fires on the first PAID activation only.
+  if (marketerId && !freeActivation) {
     const alreadyCommissioned = await Purchase.findOne({
       txRef,
       "commissions.txRef": txRef,
@@ -292,21 +293,52 @@ export const initializePayment = async (req, res) => {
     }
 
     // ── Referral code ─────────────────────────────────────────────────────────
+    // Priority:
+    //   1. Fresh code entered on this request
+    //   2. Code saved from a previous free-plan activation (upgrade path)
+    // This ensures a marketer gets commission when a referred user upgrades
+    // even if they don't re-enter the code on the upgrade screen.
     let marketerId = null,
       finalAmount = baseAmount,
       discountApplied = false;
+
     if (referralCode?.trim()) {
+      // Fresh code entered — validate it
       const marketer = await findMarketerByCode(referralCode.trim());
       if (marketer) {
         marketerId = marketer._id;
         finalAmount = applyDiscount(baseAmount, true);
         discountApplied = true;
       }
+    } else if (user.subscription?.referredBy) {
+      // No fresh code — inherit from previous free-plan referral
+      // Apply discount only if user has never made a paid purchase via this marketer
+      const prevPaidPurchase = await Purchase.findOne({
+        user: userId,
+        status: "successful",
+        marketerId: user.subscription.referredBy,
+        amount: { $gt: 0 },
+      }).lean();
+
+      if (!prevPaidPurchase) {
+        // First paid activation — honour the saved referral
+        marketerId = user.subscription.referredBy;
+        finalAmount = applyDiscount(baseAmount, true);
+        discountApplied = true;
+        console.log(
+          `[payment] Using saved referredBy ${marketerId} for upgrade — applying discount`,
+        );
+      } else {
+        // Already paid once via this marketer — still attribute but no extra discount
+        marketerId = user.subscription.referredBy;
+        console.log(
+          `[payment] Using saved referredBy ${marketerId} for upgrade — no discount (already paid)`,
+        );
+      }
     }
 
     // ── Free plan activation ──────────────────────────────────────────────────
     if (finalAmount === 0) {
-      // Double-check: user shouldn't be able to activate free if already active
       if (subscriptionActive && currentPlanId === "Basic") {
         return res.status(409).json({
           message: "You already have an active free plan.",
@@ -321,6 +353,8 @@ export const initializePayment = async (req, res) => {
         payment: { id: "free", amount: 0, currency },
         txRef,
         marketerId,
+        // Free plan never earns commission — pass amount:0 signal
+        freeActivation: true,
       });
       sendSubEmailsForUser({
         userId,
@@ -329,9 +363,12 @@ export const initializePayment = async (req, res) => {
         payment: { amount: 0, currency },
         expiresAt,
       }).catch(() => {});
-      return res
-        .status(200)
-        .json({ free: true, redirectUrl: returnUrl || "/vendor/dashboard" });
+      return res.status(200).json({
+        free: true,
+        redirectUrl: returnUrl || "/vendor/dashboard",
+        // Tell frontend if a referral code was accepted (for confirmation UI)
+        referralApplied: !!marketerId,
+      });
     }
 
     // ── Paid plan: create pending purchase + Flutterwave link ─────────────────
