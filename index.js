@@ -66,9 +66,21 @@ app.use(cookieParser());
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
 // Exact origins always allowed
+// Extra origins from env — comma-separated, e.g.:
+// EXTRA_ORIGINS=http://localhost:5174,http://localhost:5175
+const extraOrigins = (process.env.EXTRA_ORIGINS ?? "")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
 const ALLOWED_ORIGINS_EXACT = [
-  "http://localhost:3000",
-  "http://localhost:3001",
+  "http://localhost:3000", // Next.js frontend
+  "http://localhost:3001", // backend (self / SSR)
+  "http://localhost:5173", // Vite dev server (default)
+  "http://localhost:5174", // Vite marketer dashboard
+  "http://localhost:5175", // Vite fallback port
+  "http://localhost:4173", // Vite preview
+  ...extraOrigins,
   "https://smilebabahub.com",
   "https://www.smilebabahub.com",
   "https://smilebabahub.vercel.app", // Vercel production
@@ -156,6 +168,38 @@ app.use(
 );
 
 // ── Routes ────────────────────────────────────────────────────────────────────
+
+// ── /admin/live — SSE endpoint, accepts ?token= for EventSource clients ────
+// Returns 204 for non-admin/marketer tokens to stop the browser retry loop.
+app.get("/smilebaba/admin/live", async (req, res) => {
+  const rawToken = req.query.token ?? req.headers.authorization?.split(" ")[1];
+  if (!rawToken) return res.status(204).end();
+
+  try {
+    const jwt = (await import("jsonwebtoken")).default;
+    const decoded = jwt.verify(rawToken, process.env.JWT_ACCESS_SECRET);
+    const userId = decoded.userId ?? decoded.id;
+    // Check if admin — import User model lazily to avoid circular deps
+    const { default: User } = await import("./models/user.js");
+    const user = await User.findById(userId).select("email role").lean();
+    const adminEmails = (process.env.ADMIN_EMAILS ?? "")
+      .split(",")
+      .map((e) => e.trim());
+    if (!user || (user.role !== "admin" && !adminEmails.includes(user.email))) {
+      return res.status(204).end(); // not admin — silence the client
+    }
+    // Valid admin — delegate to analytics controller
+    const { getLiveAnalytics } =
+      await import("./controllers/analyticsController.js");
+    req.user = { ...decoded, userId };
+    return getLiveAnalytics(req, res);
+  } catch {
+    // Invalid token (wrong secret, expired, marketer token) — return 204 not 401
+    // so EventSource treats it as connected and stops the retry loop
+    return res.status(204).end();
+  }
+});
+
 app.use("/smilebaba/auth", authRoute);
 app.use("/smilebaba/ads", adRoute);
 app.use("/smilebaba/products", productRoute);
