@@ -81,6 +81,8 @@ export const getLiveAnalytics = async (req, res) => {
       byDevice,
       byPage,
       recentActivity,
+      uniqueSessions,
+      topReferrers,
     ] = await Promise.all([
       // Total page views
       Analytics.countDocuments({ createdAt: { $gte: last24h } }),
@@ -115,6 +117,21 @@ export const getLiveAnalytics = async (req, res) => {
         .limit(20)
         .select("path country device createdAt userId")
         .lean(),
+
+      // Unique sessions in last 24h (by IP approximated via userId or sessionId)
+      Analytics.aggregate([
+        { $match: { createdAt: { $gte: last24h } } },
+        { $group: { _id: { $ifNull: ["$userId", "$sessionId"] } } },
+        { $count: "total" },
+      ]),
+
+      // Top referrers (last 24h)
+      Analytics.aggregate([
+        { $match: { createdAt: { $gte: last24h }, referrer: { $ne: null } } },
+        { $group: { _id: "$referrer", count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: 5 },
+      ]),
     ]);
 
     // Active socket connections = currently online users
@@ -129,6 +146,7 @@ export const getLiveAnalytics = async (req, res) => {
         views5min,
         views1h,
         views24h,
+        uniqueSessions: uniqueSessions[0]?.total ?? 0,
       },
       breakdown: {
         byCountry: byCountry.map((c) => ({
@@ -140,6 +158,10 @@ export const getLiveAnalytics = async (req, res) => {
           count: d.count,
         })),
         byPage: byPage.map((p) => ({ path: p._id, count: p.count })),
+        byReferrer: topReferrers.map((r) => ({
+          referrer: r._id,
+          count: r.count,
+        })),
       },
       recentActivity,
     });

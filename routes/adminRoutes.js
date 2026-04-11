@@ -1,5 +1,6 @@
 // routes/adminRoutes.js
 import express from "express";
+import { authenticate } from "../middleware/authMiddleWare.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
 import {
   getOverview,
@@ -19,9 +20,15 @@ import {
   getLiveAnalytics,
   getHourlyViews,
 } from "../controllers/analyticsController.js";
+import {
+  getPeriodAnalytics,
+  getMarketerStats,
+  getSystemHealth,
+  generateReport,
+} from "../controllers/adminController.js";
 
 const router = express.Router();
-router.use(authMiddleware, requireAdmin);
+router.use(authenticate, requireAdmin);
 
 router.get("/overview", getOverview);
 router.get("/stats/trend", getStatsTrend);
@@ -41,13 +48,16 @@ router.post("/email/bulk", sendBulkEmail);
 // Analytics
 router.get("/analytics/live", getLiveAnalytics);
 router.get("/analytics/hourly", getHourlyViews);
+router.get("/analytics/period", authenticate, requireAdmin, getPeriodAnalytics);
+router.get("/marketers/stats", authenticate, requireAdmin, getMarketerStats);
+router.get("/system/health", authenticate, requireAdmin, getSystemHealth);
+router.get("/system/report", authenticate, requireAdmin, generateReport);
 
 // ── /admin/live — legacy endpoint that some clients call directly ──────────
 // Accepts ?token= query param since EventSource can't send headers.
 // Returns 204 (no content) for non-admin tokens so EventSource clients
 // receive a successful HTTP response and stop reconnecting immediately.
 import jwt from "jsonwebtoken";
-import authMiddleware from "../middleware/authMiddleWare.js";
 router.get(
   "/live",
   (req, res, next) => {

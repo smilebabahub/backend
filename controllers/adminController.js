@@ -400,6 +400,408 @@ export const getStatsTrend = async (req, res) => {
   }
 };
 
+// ── GET /admin/analytics/period ───────────────────────────────────────────
+// Returns aggregated stats for daily / weekly / monthly views.
+// period=daily  → last 30 days, grouped by day
+// period=weekly → last 12 weeks, grouped by week
+// period=monthly → last 12 months, grouped by month
+export const getPeriodAnalytics = async (req, res) => {
+  try {
+    const period  = req.query.period ?? "daily";   // daily | weekly | monthly
+    const country = req.query.country;             // optional country filter
+
+    const now = new Date();
+    let startDate, groupFormat, labelFormat;
+
+    if (period === "monthly") {
+      startDate   = new Date(now);
+      startDate.setMonth(startDate.getMonth() - 11);
+      startDate.setDate(1);
+      groupFormat = "%Y-%m";
+      labelFormat = "%b %Y";
+    } else if (period === "weekly") {
+      startDate = new Date(now);
+      startDate.setDate(startDate.getDate() - 83); // 12 weeks
+      groupFormat = null; // use $week
+      labelFormat = null;
+    } else {
+      startDate = new Date(now);
+      startDate.setDate(startDate.getDate() - 29); // 30 days
+      groupFormat = "%Y-%m-%d";
+      labelFormat = "%d %b";
+    }
+
+    // Page views from Analytics collection
+    const viewsMatch = { createdAt: { $gte: startDate } };
+    if (country) viewsMatch.country = country;
+
+    const viewsAgg = period === "weekly"
+      ? await Analytics.aggregate([
+          { $match: viewsMatch },
+          { $group: {
+            _id:   { year: { $isoWeekYear: "$createdAt" }, week: { $isoWeek: "$createdAt" } },
+            count: { $sum: 1 },
+          }},
+          { $sort: { "_id.year": 1, "_id.week": 1 } },
+          { $limit: 12 },
+        ])
+      : await Analytics.aggregate([
+          { $match: viewsMatch },
+          { $group: {
+            _id:   { $dateToString: { format: groupFormat, date: "$createdAt" } },
+            count: { $sum: 1 },
+          }},
+          { $sort: { "_id": 1 } },
+        ]);
+
+    // New user registrations
+    const userMatch = { createdAt: { $gte: startDate } };
+    if (country) userMatch.country = country;
+
+    const usersAgg = period === "weekly"
+      ? await User.aggregate([
+          { $match: userMatch },
+          { $group: {
+            _id:   { year: { $isoWeekYear: "$createdAt" }, week: { $isoWeek: "$createdAt" } },
+            count: { $sum: 1 },
+          }},
+          { $sort: { "_id.year": 1, "_id.week": 1 } },
+          { $limit: 12 },
+        ])
+      : await User.aggregate([
+          { $match: userMatch },
+          { $group: {
+            _id:   { $dateToString: { format: groupFormat, date: "$createdAt" } },
+            count: { $sum: 1 },
+          }},
+          { $sort: { "_id": 1 } },
+        ]);
+
+    // Revenue per period
+    const revAgg = period === "weekly"
+      ? await Purchase.aggregate([
+          { $match: { status: "successful", createdAt: { $gte: startDate } } },
+          { $group: {
+            _id:      { year: { $isoWeekYear: "$createdAt" }, week: { $isoWeek: "$createdAt" }, currency: "$currency" },
+            total:    { $sum: "$amount" },
+          }},
+          { $sort: { "_id.year": 1, "_id.week": 1 } },
+        ])
+      : await Purchase.aggregate([
+          { $match: { status: "successful", createdAt: { $gte: startDate } } },
+          { $group: {
+            _id:   { period: { $dateToString: { format: groupFormat, date: "$createdAt" } }, currency: "$currency" },
+            total: { $sum: "$amount" },
+          }},
+          { $sort: { "_id.period": 1 } },
+        ]);
+
+    // Marketer registrations
+    const marketerAgg = period === "weekly"
+      ? await Marketer.aggregate([
+          { $match: { createdAt: { $gte: startDate } } },
+          { $group: {
+            _id:   { year: { $isoWeekYear: "$createdAt" }, week: { $isoWeek: "$createdAt" } },
+            count: { $sum: 1 },
+          }},
+          { $sort: { "_id.year": 1, "_id.week": 1 } },
+          { $limit: 12 },
+        ])
+      : await Marketer.aggregate([
+          { $match: { createdAt: { $gte: startDate } } },
+          { $group: {
+            _id:   { $dateToString: { format: groupFormat, date: "$createdAt" } },
+            count: { $sum: 1 },
+          }},
+          { $sort: { "_id": 1 } },
+        ]);
+
+    const keyOf = (item) => period === "weekly"
+      ? `${item._id.year}-W${String(item._id.week).padStart(2,"0")}`
+      : item._id;
+
+    const labelOf = (item) => {
+      if (period === "weekly") return `W${item._id.week}`;
+      if (period === "monthly") {
+        const d = new Date(item._id + "-01");
+        return d.toLocaleDateString("en-GH", { month: "short", year: "2-digit" });
+      }
+      const d = new Date(item._id);
+      return d.toLocaleDateString("en-GH", { month: "short", day: "numeric" });
+    };
+
+    // Build unified keys list from views (most complete)
+    const keys   = viewsAgg.map(keyOf);
+    const labels = viewsAgg.map(labelOf);
+
+    const viewMap     = Object.fromEntries(viewsAgg.map((r) => [keyOf(r), r.count]));
+    const userMap     = Object.fromEntries(usersAgg.map((r) => [keyOf(r), r.count]));
+    const marketerMap = Object.fromEntries(marketerAgg.map((r) => [keyOf(r), r.count]));
+
+    // Revenue maps by currency
+    const revGHSMap = {}, revNGNMap = {};
+    for (const r of revAgg) {
+      const k = period === "weekly"
+        ? `${r._id.year}-W${String(r._id.week).padStart(2,"0")}`
+        : r._id.period;
+      if (r._id.currency === "GHS") revGHSMap[k] = (revGHSMap[k] ?? 0) + r.total;
+      if (r._id.currency === "NGN") revNGNMap[k] = (revNGNMap[k] ?? 0) + r.total;
+    }
+
+    // Ensure all keys present in every series
+    const allKeys = [...new Set([
+      ...keys,
+      ...usersAgg.map(keyOf),
+      ...marketerAgg.map(keyOf),
+    ])].sort();
+
+    const result = allKeys.map((k, i) => ({
+      key:       k,
+      label:     labels[keys.indexOf(k)] ?? k,
+      views:     viewMap[k]     ?? 0,
+      newUsers:  userMap[k]     ?? 0,
+      marketers: marketerMap[k] ?? 0,
+      revenueGHS:revGHSMap[k]  ?? 0,
+      revenueNGN:revNGNMap[k]  ?? 0,
+    }));
+
+    res.status(200).json({ period, country: country ?? "all", data: result });
+  } catch (err) {
+    console.error("getPeriodAnalytics error:", err);
+    res.status(500).json({ message: "Failed to fetch period analytics" });
+  }
+};
+
+// ── GET /admin/marketers/stats ─────────────────────────────────────────────
+// Country breakdown + registration timeline for marketers.
+export const getMarketerStats = async (req, res) => {
+  try {
+    const now = new Date();
+
+    const [
+      totalGH, totalNG, totalAll,
+      activeGH, activeNG,
+      newToday, newWeek, newMonth,
+      topByReferrals,
+      registrationsByDay,
+    ] = await Promise.all([
+      Marketer.countDocuments({ country: "Ghana"   }),
+      Marketer.countDocuments({ country: "Nigeria" }),
+      Marketer.countDocuments(),
+      Marketer.countDocuments({ country: "Ghana",   isActive: true }),
+      Marketer.countDocuments({ country: "Nigeria", isActive: true }),
+      Marketer.countDocuments({ createdAt: { $gte: new Date(now - 86400000) } }),
+      Marketer.countDocuments({ createdAt: { $gte: new Date(now - 7 * 86400000) } }),
+      Marketer.countDocuments({ createdAt: { $gte: new Date(now - 30 * 86400000) } }),
+
+      // Top 5 marketers by referrals
+      Marketer.find({ isActive: true })
+        .sort({ totalReferrals: -1 })
+        .limit(5)
+        .select("name email country referralCode totalReferrals totalEarningsGHS totalEarningsNGN")
+        .lean(),
+
+      // Daily registrations last 30 days
+      Marketer.aggregate([
+        { $match: { createdAt: { $gte: new Date(now - 30 * 86400000) } } },
+        { $group: {
+          _id:   { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+          count: { $sum: 1 },
+        }},
+        { $sort: { "_id": 1 } },
+      ]),
+    ]);
+
+    // Fill last 30 days
+    const days = [];
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date(now);
+      d.setDate(d.getDate() - i);
+      const key   = d.toISOString().split("T")[0];
+      const found = registrationsByDay.find((r) => r._id === key);
+      days.push({
+        date:  key,
+        label: d.toLocaleDateString("en-GH", { month: "short", day: "numeric" }),
+        count: found?.count ?? 0,
+      });
+    }
+
+    res.status(200).json({
+      counts: {
+        total: totalAll, gh: totalGH, ng: totalNG,
+        activeGH, activeNG,
+        newToday, newWeek, newMonth,
+      },
+      topByReferrals,
+      registrations: days,
+    });
+  } catch (err) {
+    console.error("getMarketerStats error:", err);
+    res.status(500).json({ message: "Failed to fetch marketer stats" });
+  }
+};
+
+// ── GET /admin/system/health ───────────────────────────────────────────────
+// System health check — DB, Redis, email, storage, payment gateway.
+export const getSystemHealth = async (req, res) => {
+  const checks = [];
+  const t = (label, fn) => ({ label, fn });
+
+  const start = Date.now();
+
+  // MongoDB
+  try {
+    await User.findOne().select("_id").lean().maxTimeMS(2000);
+    checks.push({ service: "MongoDB", status: "ok", ms: Date.now() - start });
+  } catch (e) {
+    checks.push({ service: "MongoDB", status: "error", error: e.message });
+  }
+
+  // Redis
+  const redisStart = Date.now();
+  try {
+    const { safeRedis } = await import("../lib/redis.js");
+    await safeRedis((c) => c.ping());
+    checks.push({ service: "Redis", status: "ok", ms: Date.now() - redisStart });
+  } catch (e) {
+    checks.push({ service: "Redis", status: "error", error: e.message });
+  }
+
+  // Cloudinary env vars present
+  checks.push({
+    service:  "Cloudinary",
+    status:   process.env.CLOUDINARY_API_KEY ? "ok" : "warning",
+    note:     process.env.CLOUDINARY_API_KEY ? "Credentials present" : "CLOUDINARY_API_KEY not set",
+  });
+
+  // Flutterwave
+  checks.push({
+    service:  "Flutterwave (GH)",
+    status:   process.env.FLW_SECRET_KEY_GH ? "ok" : "warning",
+    note:     process.env.FLW_SECRET_KEY_GH ? "Key present" : "FLW_SECRET_KEY_GH not set",
+  });
+  checks.push({
+    service:  "Flutterwave (NG)",
+    status:   process.env.FLW_SECRET_KEY_NG ? "ok" : "warning",
+    note:     process.env.FLW_SECRET_KEY_NG ? "Key present" : "FLW_SECRET_KEY_NG not set",
+  });
+
+  // Gmail SMTP
+  checks.push({
+    service: "Gmail SMTP",
+    status:  process.env.EMAIL_USER && process.env.EMAIL_PASS ? "ok" : "warning",
+    note:    process.env.EMAIL_USER ? `Configured as ${process.env.EMAIL_USER}` : "EMAIL_USER not set",
+  });
+
+  // Pending purchases older than 24h (indicates payment flow issues)
+  const stalePending = await Purchase.countDocuments({
+    status: "pending",
+    createdAt: { $lt: new Date(Date.now() - 24 * 3600000) },
+  });
+  checks.push({
+    service: "Payment flow",
+    status:  stalePending > 10 ? "warning" : "ok",
+    note:    `${stalePending} stale pending purchase${stalePending !== 1 ? "s" : ""}`,
+    value:   stalePending,
+  });
+
+  // Ads with no expiresAt (data quality)
+  const adsNoExpiry = await Ad.countDocuments({ isActive: true, expiresAt: null });
+  checks.push({
+    service: "Ad data quality",
+    status:  adsNoExpiry > 0 ? "warning" : "ok",
+    note:    `${adsNoExpiry} active ad${adsNoExpiry !== 1 ? "s" : ""} without expiry date`,
+    value:   adsNoExpiry,
+  });
+
+  // Failed emails in last 24h (approximate from log — we track none currently,
+  // so check if EMAIL env is set as a proxy)
+  const overall = checks.every((c) => c.status !== "error") ? "healthy"
+                : checks.some((c) => c.status === "error")  ? "degraded"
+                : "warning";
+
+  res.status(200).json({
+    overall,
+    uptime:  Math.floor(process.uptime()),
+    checks,
+    ts:      new Date().toISOString(),
+  });
+};
+
+// ── GET /admin/system/report ───────────────────────────────────────────────
+// Generate a summary report for a given period (week | month).
+// Returns JSON — the frontend can render or trigger a download.
+export const generateReport = async (req, res) => {
+  try {
+    const period = req.query.period ?? "week"; // week | month
+    const now    = new Date();
+    const since  = period === "month"
+      ? new Date(now.getFullYear(), now.getMonth() - 1, now.getDate())
+      : new Date(now - 7 * 86400000);
+
+    const [
+      newUsers, newVendors, newMarketers, newAds,
+      revenueAgg,
+      topAds, topPages,
+      failedPayments, successPayments,
+    ] = await Promise.all([
+      User.countDocuments({ createdAt: { $gte: since } }),
+      User.countDocuments({ role: "vendor", createdAt: { $gte: since } }),
+      Marketer.countDocuments({ createdAt: { $gte: since } }),
+      Ad.countDocuments({ createdAt: { $gte: since } }),
+
+      Purchase.aggregate([
+        { $match: { status: "successful", createdAt: { $gte: since } } },
+        { $group: { _id: "$currency", total: { $sum: "$amount" }, count: { $sum: 1 } } },
+      ]),
+
+      Ad.find({ isActive: true }).sort({ views: -1 }).limit(10)
+        .select("title views contactClicks location.country category.main postedBy")
+        .populate("postedBy", "username")
+        .lean(),
+
+      Analytics.aggregate([
+        { $match: { createdAt: { $gte: since } } },
+        { $group: { _id: "$path", views: { $sum: 1 } } },
+        { $sort: { views: -1 } }, { $limit: 10 },
+      ]),
+
+      Purchase.countDocuments({ status: "failed",  createdAt: { $gte: since } }),
+      Purchase.countDocuments({ status: "successful", createdAt: { $gte: since } }),
+    ]);
+
+    const revenue = {};
+    for (const r of revenueAgg) revenue[r._id] = { total: r.total, count: r.count };
+
+    res.status(200).json({
+      period,
+      generatedAt: now.toISOString(),
+      since:       since.toISOString(),
+      summary: {
+        newUsers, newVendors, newMarketers, newAds,
+        revenue,
+        successPayments, failedPayments,
+        paymentSuccessRate: successPayments + failedPayments > 0
+          ? Math.round((successPayments / (successPayments + failedPayments)) * 100)
+          : 100,
+      },
+      topAds: topAds.map((a) => ({
+        title:        a.title,
+        views:        a.views,
+        contactClicks:a.contactClicks,
+        conversion:   a.views > 0 ? ((a.contactClicks / a.views) * 100).toFixed(1) : "0",
+        country:      a.location?.country,
+        category:     a.category?.main,
+        vendor:       a.postedBy?.username,
+      })),
+      topPages: topPages.map((p) => ({ path: p._id, views: p.views })),
+    });
+  } catch (err) {
+    console.error("generateReport error:", err);
+    res.status(500).json({ message: "Failed to generate report" });
+  }
+};
+
 // ── GET /admin/stats/conversion ───────────────────────────────────────────
 // Top ads by conversion rate (contactClicks / views).
 // Helps admins identify high-performing listings and advise vendors.
