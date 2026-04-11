@@ -40,18 +40,32 @@ export const getProducts = async (req, res) => {
       if (cached) return res.status(200).json({ ...cached, fromCache: true });
     }
 
-    // location.country: match exact OR missing/empty — older ads without a
-    // country field are shown in both country feeds rather than disappearing.
+    const now = new Date();
+
+    // Public feed: active + non-expired listings only.
+    // Expired products are never shown to customers — only visible to the
+    // vendor who posted them via their own dashboard/GET /ads/my endpoint.
     const filter = {
+      isActive: true,
+      isSold: false,
+      isPaused: false,
+      // Country: exact match OR missing/empty (older records)
       $or: [
         { "location.country": resolvedCountry },
         { "location.country": { $exists: false } },
         { "location.country": "" },
         { "location.country": null },
       ],
-      isActive: true,
-      isSold: false,
-      isPaused: false,
+      // Expiry: not yet expired
+      $and: [
+        {
+          $or: [
+            { expiresAt: { $gt: now } },
+            { expiresAt: null },
+            { expiresAt: { $exists: false } },
+          ],
+        },
+      ],
     };
 
     if (category) filter["category.main"] = category;

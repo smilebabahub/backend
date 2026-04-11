@@ -516,11 +516,39 @@ export const sendBulkEmail = async (req, res) => {
       `subject: "${subject}", delay: ${DELAY_MS}ms`
     );
 
-    let sent = 0, failed = 0;
+    let sent = 0, failed = 0, skipped = 0;
+
+    // Import MX validator to skip addresses that will definitely bounce
+    const { validateEmail } = await import("../lib/validateEmail.js");
 
     for (const r of recipients) {
       const name  = r.name ?? r.username ?? "there";
-      const email = r.email;
+      const email = r.email?.trim().toLowerCase();
+
+      if (!email) { skipped++; continue; }
+
+      // Quick format check — skip obviously invalid addresses without DNS call
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        console.warn(`[bulk email] Skipping invalid address: ${email}`);
+        skipped++;
+        continue;
+      }
+
+      // DNS MX check — skip addresses whose domain has no mail servers
+      // (catches @gmail.com addresses that don't exist at the domain level
+      //  and any typo domains like @gmial.com)
+      try {
+        const check = await validateEmail(email);
+        if (!check.valid) {
+          console.warn(`[bulk email] Skipping ${email}: ${check.reason}`);
+          skipped++;
+          await sleep(DELAY_MS);
+          continue;
+        }
+      } catch {
+        // validateEmail never throws but guard anyway
+      }
+
       try {
         await sendAdminDirectEmail({ to: email, name, subject, message });
         sent++;
@@ -528,12 +556,14 @@ export const sendBulkEmail = async (req, res) => {
         failed++;
         console.error(`[bulk email] Failed for ${email}:`, err.message);
       }
+
       // Throttle — one email per DELAY_MS
       await sleep(DELAY_MS);
     }
 
     console.log(
-      `[bulk email] Done — sent: ${sent}, failed: ${failed} / ${recipients.length} total`
+      `[bulk email] Done — sent: ${sent}, failed: ${failed}, ` +
+      `skipped (invalid): ${skipped} / ${recipients.length} total`
     );
   } catch (err) {
     console.error("[bulk email] Job error:", err);
