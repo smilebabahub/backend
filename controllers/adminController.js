@@ -4,7 +4,8 @@ import Purchase from "../models/purchaseModel.js";
 import Marketer from "../models/marketerModel.js";
 import Ad       from "../models/adModel.js";
 import Stats    from "../models/statsModel.js";
-
+import Analytics  from "../models/analytics.js";
+import { logError, getErrors, clearErrors, getErrorSummary } from "../lib/errorLog.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 const parsePage  = (q) => Math.max(1, parseInt(q ?? "1",  10));
@@ -90,7 +91,7 @@ export const getOverview = async (req, res) => {
       recentPurchases,
     });
   } catch (error) {
-    console.error("getOverview error:", error);
+    logError("getOverview", error);
     res.status(500).json({ message: "Failed to load overview" });
   }
 };
@@ -117,17 +118,29 @@ export const getUsers = async (req, res) => {
       ];
     }
 
-    const [users, total, totalVendors, totalGuests] = await Promise.all([
+    const [rawUsers, total, totalVendors, totalGuests] = await Promise.all([
       User.find(filter)
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
-        .select("-password -loginHistory")
+        .select("-password")          // keep loginHistory so we can extract country
         .lean(),
       User.countDocuments(filter),
       User.countDocuments({ ...filter, role: "vendor" }),
       User.countDocuments({ ...filter, role: "guest"  }),
     ]);
+
+    // Enrich country: prefer root field, fall back to last loginHistory entry
+    const users = rawUsers.map((u) => {
+      const lastLogin   = u.loginHistory?.[u.loginHistory.length - 1];
+      const rawCountry  = u.country || lastLogin?.country || "";
+      const enriched    = rawCountry.toLowerCase().includes("nigeria") ? "Nigeria"
+                        : rawCountry.toLowerCase().includes("ghana")   ? "Ghana"
+                        : rawCountry || null;
+      // Strip loginHistory from response — not needed by frontend
+      const { loginHistory: _, ...rest } = u;
+      return { ...rest, country: enriched };
+    });
 
     res.status(200).json({
       users,
@@ -431,28 +444,51 @@ export const getPeriodAnalytics = async (req, res) => {
       labelFormat = "%d %b";
     }
 
-    // Page views from Analytics collection
-    const viewsMatch = { createdAt: { $gte: startDate } };
-    if (country) viewsMatch.country = country;
+    // Page views:
+    //   daily   → Analytics collection (last 24h TTL, so only today's data available)
+    //             For days beyond 24h we fall back to Stats daily snapshots.
+    //   weekly  → Stats collection (daily snapshots aggregated to weeks)
+    //   monthly → Stats collection (daily snapshots aggregated to months)
+    //
+    // Analytics TTL is 24h — never query it for ranges > 1 day.
 
-    const viewsAgg = period === "weekly"
-      ? await Analytics.aggregate([
-          { $match: viewsMatch },
-          { $group: {
-            _id:   { year: { $isoWeekYear: "$createdAt" }, week: { $isoWeek: "$createdAt" } },
-            count: { $sum: 1 },
-          }},
-          { $sort: { "_id.year": 1, "_id.week": 1 } },
-          { $limit: 12 },
-        ])
-      : await Analytics.aggregate([
-          { $match: viewsMatch },
-          { $group: {
-            _id:   { $dateToString: { format: groupFormat, date: "$createdAt" } },
-            count: { $sum: 1 },
-          }},
-          { $sort: { "_id": 1 } },
-        ]);
+    let viewsAgg = [];
+    if (period === "daily") {
+      // Last 30 days from Stats snapshots (totalViews field)
+      const statsMatch = { date: { $gte: startDate.toISOString().split("T")[0] } };
+      if (country) statsMatch.country = country;
+      const snapshots = await Stats.find(statsMatch)
+        .sort({ date: 1 })
+        .select("date totalViews")
+        .lean();
+      viewsAgg = snapshots.map((s) => ({ _id: s.date, count: s.totalViews ?? 0 }));
+
+    } else if (period === "weekly") {
+      // Aggregate Stats daily snapshots into ISO weeks
+      const statsMatch = { createdAt: { $gte: startDate } };
+      if (country) statsMatch.country = country;
+      viewsAgg = await Stats.aggregate([
+        { $match: country ? { country, date: { $gte: startDate.toISOString().split("T")[0] } }
+                          : { date: { $gte: startDate.toISOString().split("T")[0] } } },
+        { $addFields: { dateObj: { $dateFromString: { dateString: "$date" } } } },
+        { $group: {
+          _id:   { year: { $isoWeekYear: "$dateObj" }, week: { $isoWeek: "$dateObj" } },
+          count: { $sum: "$totalViews" },
+        }},
+        { $sort: { "_id.year": 1, "_id.week": 1 } },
+        { $limit: 12 },
+      ]);
+
+    } else {
+      // Monthly — aggregate Stats into months
+      viewsAgg = await Stats.aggregate([
+        { $match: country ? { country, date: { $gte: startDate.toISOString().split("T")[0] } }
+                          : { date: { $gte: startDate.toISOString().split("T")[0] } } },
+        { $addFields: { month: { $substr: ["$date", 0, 7] } } },
+        { $group: { _id: "$month", count: { $sum: "$totalViews" } } },
+        { $sort: { "_id": 1 } },
+      ]);
+    }
 
     // New user registrations
     const userMatch = { createdAt: { $gte: startDate } };
@@ -722,9 +758,10 @@ export const getSystemHealth = async (req, res) => {
 
   res.status(200).json({
     overall,
-    uptime:  Math.floor(process.uptime()),
+    uptime:   Math.floor(process.uptime()),
     checks,
-    ts:      new Date().toISOString(),
+    ts:       new Date().toISOString(),
+    errorSummary: getErrorSummary(60),
   });
 };
 
@@ -797,9 +834,26 @@ export const generateReport = async (req, res) => {
       topPages: topPages.map((p) => ({ path: p._id, views: p.views })),
     });
   } catch (err) {
-    console.error("generateReport error:", err);
+    logError("generateReport", err, { period: req.query.period });
     res.status(500).json({ message: "Failed to generate report" });
   }
+};
+
+// ── GET /admin/system/errors ───────────────────────────────────────────────
+// Returns recent in-process errors for the admin system page.
+export const getSystemErrors = async (req, res) => {
+  const limit  = Math.min(200, parseInt(req.query.limit ?? "100", 10));
+  const source = req.query.source ?? null;
+  res.status(200).json({
+    errors:  getErrors(limit, source),
+    summary: getErrorSummary(60),
+  });
+};
+
+// ── DELETE /admin/system/errors ────────────────────────────────────────────
+export const clearSystemErrors = async (req, res) => {
+  clearErrors();
+  res.status(200).json({ message: "Error log cleared" });
 };
 
 // ── GET /admin/stats/conversion ───────────────────────────────────────────

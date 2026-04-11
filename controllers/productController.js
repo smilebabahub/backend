@@ -41,23 +41,46 @@ export const getProducts = async (req, res) => {
     }
 
     const now = new Date();
+    const skip = (Number(page) - 1) * Number(limit);
+    const lim = Number(limit);
 
-    // Public feed: active + non-expired listings only.
-    // Expired products are never shown to customers — only visible to the
-    // vendor who posted them via their own dashboard/GET /ads/my endpoint.
-    const filter = {
+    // ── Shared filters (country + category) ──────────────────────────────
+    const andClauses = [
+      // Country: exact match OR missing/empty (older records without country field)
+      {
+        $or: [
+          { "location.country": resolvedCountry },
+          { "location.country": { $exists: false } },
+          { "location.country": "" },
+          { "location.country": null },
+        ],
+      },
+    ];
+
+    const baseFilter = {
       isActive: true,
       isSold: false,
       isPaused: false,
-      // Country: exact match OR missing/empty (older records)
-      $or: [
-        { "location.country": resolvedCountry },
-        { "location.country": { $exists: false } },
-        { "location.country": "" },
-        { "location.country": null },
-      ],
-      // Expiry: not yet expired
+      $and: andClauses,
+    };
+
+    if (category) baseFilter["category.main"] = category;
+    if (sub) baseFilter["category.sub"] = sub;
+    if (featured === "true") baseFilter.isFeatured = true;
+    if (search) baseFilter.$text = { $search: search };
+    if (currency) baseFilter["price.currency"] = currency;
+
+    if (minPrice || maxPrice) {
+      baseFilter["price.amount"] = {};
+      if (minPrice) baseFilter["price.amount"].$gte = Number(minPrice);
+      if (maxPrice) baseFilter["price.amount"].$lte = Number(maxPrice);
+    }
+
+    // ── Active filter: not yet expired (high priority) ───────────────────
+    const activeFilter = {
+      ...baseFilter,
       $and: [
+        ...andClauses,
         {
           $or: [
             { expiresAt: { $gt: now } },
@@ -68,18 +91,14 @@ export const getProducts = async (req, res) => {
       ],
     };
 
-    if (category) filter["category.main"] = category;
-    if (sub) filter["category.sub"] = sub;
-    if (featured === "true") filter.isFeatured = true;
-    if (search) filter.$text = { $search: search };
-
-    if (minPrice || maxPrice) {
-      filter["price.amount"] = {};
-      if (minPrice) filter["price.amount"].$gte = Number(minPrice);
-      if (maxPrice) filter["price.amount"].$lte = Number(maxPrice);
-    }
-
-    if (currency) filter["price.currency"] = currency;
+    // ── Expired filter: expired within last 30 days (low priority) ───────
+    const thirtyDaysAgo = new Date(now - 30 * 86400000);
+    const expiredFilter = {
+      ...baseFilter,
+      isActive: { $in: [true, false] },
+      isSold: false,
+      expiresAt: { $lte: now, $gte: thirtyDaysAgo },
+    };
 
     const sortMap = {
       newest: { "boost.isBoosted": -1, createdAt: -1 },
@@ -88,27 +107,50 @@ export const getProducts = async (req, res) => {
       price_desc: { "price.amount": -1 },
       popular: { views: -1 },
     };
+    const sortQuery = sortMap[sort] || sortMap.newest;
 
-    const skip = (Number(page) - 1) * Number(limit);
-
-    const [total, docs] = await Promise.all([
-      Ad.countDocuments(filter),
-      Ad.find(filter)
-        .sort(sortMap[sort] || sortMap.newest)
+    // ── Fetch active products first ───────────────────────────────────────
+    const [activeDocs, activeTotal] = await Promise.all([
+      Ad.find(activeFilter)
+        .sort(sortQuery)
         .skip(skip)
-        .limit(Number(limit))
+        .limit(lim)
         .populate("postedBy", "username profilePicture phone")
         .lean(),
+      Ad.countDocuments(activeFilter),
     ]);
+
+    // ── Pad remaining slots with expired products (low priority) ─────────
+    const remaining = lim - activeDocs.length;
+    let expiredDocs = [];
+    let expiredTotal = 0;
+
+    if (remaining > 0) {
+      const expiredSkip = Math.max(0, skip - activeTotal);
+      [expiredDocs, expiredTotal] = await Promise.all([
+        Ad.find(expiredFilter)
+          .sort({ expiresAt: -1 })
+          .skip(expiredSkip)
+          .limit(remaining)
+          .populate("postedBy", "username profilePicture phone")
+          .lean(),
+        Ad.countDocuments(expiredFilter),
+      ]);
+    }
+
+    const docs = [...activeDocs, ...expiredDocs];
+    const total = activeTotal + expiredTotal;
 
     const products = docs.map(normaliseProduct);
     const result = {
       products,
       meta: {
         total,
+        activeTotal,
+        expiredTotal,
         page: Number(page),
-        limit: Number(limit),
-        totalPages: Math.ceil(total / Number(limit)),
+        limit: lim,
+        totalPages: Math.ceil(total / lim),
         hasNext: skip + docs.length < total,
       },
     };

@@ -33,21 +33,30 @@ export const trackPageView = async (req, res) => {
   res.status(202).end();
 
   try {
-    const { path, referrer } = req.body;
+    const { path, referrer, country: bodyCountry } = req.body;
     if (!path) return;
 
-    const country = (req.headers["cf-ipcountry"] || "").toUpperCase();
-    const countryName =
-      country === "NG"
+    // Country resolution priority:
+    //   1. Body param sent by frontend (from Redux — most reliable in production)
+    //   2. Cloudflare cf-ipcountry header (works when behind CF proxy)
+    //   3. "Unknown" fallback
+    const cfCountry = (req.headers["cf-ipcountry"] || "").toUpperCase();
+    const cfName =
+      cfCountry === "NG" ? "Nigeria" : cfCountry === "GH" ? "Ghana" : null;
+
+    // Normalise body country
+    const bodyName =
+      bodyCountry === "Nigeria"
         ? "Nigeria"
-        : country === "GH"
+        : bodyCountry === "Ghana"
           ? "Ghana"
-          : country || "Unknown";
+          : null;
+
+    const countryName = bodyName ?? cfName ?? "Unknown";
 
     const ua = req.headers["user-agent"] || "";
     const device = detectDevice(ua);
 
-    // userId is optional — only present for logged-in users who send the token
     const userId = req.user?.userId ?? null;
 
     await Analytics.create({
