@@ -1,3 +1,4 @@
+import { logError } from "../lib/errorLog.js";
 import User from "../models/user.js";
 import Marketer from "../models/marketerModel.js";
 import Purchase from "../models/purchaseModel.js";
@@ -13,7 +14,7 @@ import { publish, CHANNELS } from "../lib/redis.js";
 import { sendSubscriptionEmails } from "../lib/emailService.js";
 import { pushToUser } from "../lib/socketHandler.js";
 
-const REFERRAL_DISCOUNT = 0.15;
+const REFERRAL_DISCOUNT = 0.15; // 15% commission to marketer, 15% discount to vendor
 
 // Plan tier order — higher index = higher plan
 const PLAN_TIERS = ["Basic", "standard", "popular", "premium"];
@@ -437,10 +438,7 @@ export const initializePayment = async (req, res) => {
       discountPercent: discountApplied ? 20 : 0,
     });
   } catch (error) {
-    console.error(
-      "initializePayment error:",
-      error.response?.data || error.message,
-    );
+    logError("initializePayment", error.response?.data || error.message);
     res.status(500).json({ message: "Payment initialization failed" });
   }
 };
@@ -707,7 +705,7 @@ export const getPurchaseHistory = async (req, res) => {
       activePlan: user?.subscription ?? null,
     });
   } catch (error) {
-    console.error("getPurchaseHistory error:", error);
+    logError("getPurchaseHistory", error);
     res.status(500).json({ message: "Failed to fetch purchase history" });
   }
 };
