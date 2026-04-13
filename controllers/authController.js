@@ -1,3 +1,4 @@
+import { logError } from "../lib/errorLog.js";
 import User from "../models/user.js";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
@@ -707,7 +708,7 @@ export const updateProfile = async (req, res) => {
       .status(200)
       .json({ message: "Profile updated", user: serializeUser(user) });
   } catch (err) {
-    console.error("updateProfile error:", err);
+    logError("updateProfile", err);
     res.status(500).json({ message: "Failed to update profile" });
   }
 };
@@ -916,5 +917,107 @@ ${description}
   } catch (err) {
     console.error("submitPromotion error:", err);
     res.status(500).json({ message: "Failed to submit promotion" });
+  }
+};
+
+// ── OTP: generate, send, verify ────────────────────────────────────────────
+// Phone verification is optional — users can use the app without it.
+// OTP is stored hashed on the user document for 10 minutes.
+
+function generateOTP() {
+  return String(Math.floor(100000 + Math.random() * 900000)); // 6-digit
+}
+
+// POST /auth/resend-otp  { phone }
+export const resendOTP = async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone)
+      return res.status(400).json({ message: "Phone number required" });
+
+    // Find user by phone (any user — not just the caller)
+    const user = await User.findOne({ phone: phone.trim() });
+    if (!user)
+      return res
+        .status(404)
+        .json({ message: "No account with that phone number" });
+
+    const otp = generateOTP();
+    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 min
+    const otpHash = crypto.createHash("sha256").update(otp).digest("hex");
+
+    await User.findByIdAndUpdate(user._id, {
+      otpHash,
+      otpExpiry,
+      otpAttempts: 0,
+    });
+
+    // Send via SMS — non-blocking
+    const { sendSMS } = await import("../lib/smsService.js");
+    sendSMS(
+      phone,
+      `SmileBaba verification code: ${otp}. Valid for 10 minutes. Do not share.`,
+    ).catch((e) => console.error("[OTP SMS]", e.message));
+
+    res.status(200).json({ message: "OTP sent to your phone" });
+  } catch (err) {
+    console.error("resendOTP error:", err);
+    res.status(500).json({ message: "Failed to send OTP" });
+  }
+};
+
+// POST /auth/verify-otp  { phone, otp }
+export const verifyOTP = async (req, res) => {
+  try {
+    const { phone, otp } = req.body;
+    if (!phone || !otp) {
+      return res.status(400).json({ message: "Phone and OTP are required" });
+    }
+
+    const user = await User.findOne({ phone: phone.trim() });
+    if (!user)
+      return res
+        .status(404)
+        .json({ message: "No account with that phone number" });
+
+    // Lock out after 5 wrong attempts
+    if ((user.otpAttempts ?? 0) >= 5) {
+      return res.status(429).json({
+        message: "Too many attempts. Request a new OTP.",
+      });
+    }
+
+    // Check expiry
+    if (!user.otpExpiry || new Date(user.otpExpiry) < new Date()) {
+      return res
+        .status(400)
+        .json({ message: "OTP has expired. Request a new one." });
+    }
+
+    // Compare hash
+    const incoming = crypto
+      .createHash("sha256")
+      .update(String(otp).trim())
+      .digest("hex");
+    if (incoming !== user.otpHash) {
+      await User.findByIdAndUpdate(user._id, { $inc: { otpAttempts: 1 } });
+      return res.status(400).json({ message: "Incorrect OTP" });
+    }
+
+    // Mark phone as verified, clear OTP
+    await User.findByIdAndUpdate(user._id, {
+      phoneVerified: true,
+      otpHash: null,
+      otpExpiry: null,
+      otpAttempts: 0,
+    });
+
+    res.status(200).json({
+      message: "Phone verified successfully",
+      phoneVerified: true,
+    });
+  } catch (err) {
+    console.error("verifyOTP error:", err);
+    res.status(500).json({ message: "Failed to verify OTP" });
   }
 };

@@ -1,13 +1,14 @@
 // controllers/orderController.js
 import Order from "../models/orderModel.js";
-import Ad from "../models/adModel.js";
-import User from "../models/user.js";
+import Ad    from "../models/adModel.js";
+import User  from "../models/user.js";
 import { sendSMS } from "../lib/smsService.js";
 
 // ── GET /orders/my — buyer's orders ────────────────────────────────────────
 export const getMyOrders = async (req, res) => {
   try {
-    const orders = await Order.find({ buyer: req.user.userId })
+    const orders = await Order
+      .find({ buyer: req.user.userId })
       .sort({ createdAt: -1 })
       .populate("vendor", "username")
       .populate("ad", "title")
@@ -15,14 +16,14 @@ export const getMyOrders = async (req, res) => {
 
     res.status(200).json({
       orders: orders.map((o) => ({
-        _id: String(o._id),
-        items: o.items ?? [],
-        total: o.total ?? 0,
-        currency: o.currency ?? "GHS",
-        status: o.status ?? "pending",
-        vendor: o.vendor?.username ?? "Unknown vendor",
+        _id:             String(o._id),
+        items:           o.items ?? [],
+        total:           o.total ?? 0,
+        currency:        o.currency ?? "GHS",
+        status:          o.status ?? "pending",
+        vendor:          o.vendor?.username ?? "Unknown vendor",
         deliveryAddress: o.deliveryAddress ?? "",
-        createdAt: o.createdAt,
+        createdAt:       o.createdAt,
       })),
     });
   } catch (err) {
@@ -52,16 +53,16 @@ export const getVendorOrders = async (req, res) => {
 
     res.status(200).json({
       orders: orders.map((o) => ({
-        _id: String(o._id),
-        items: o.items ?? [],
-        total: o.total ?? 0,
-        currency: o.currency ?? "GHS",
-        status: o.status ?? "pending",
-        buyer: o.buyer?.username ?? "Customer",
-        buyerPhone: o.buyer?.phone ?? "",
-        adTitle: o.ad?.title ?? "",
+        _id:             String(o._id),
+        items:           o.items ?? [],
+        total:           o.total ?? 0,
+        currency:        o.currency ?? "GHS",
+        status:          o.status ?? "pending",
+        buyer:           o.buyer?.username ?? "Customer",
+        buyerPhone:      o.buyer?.phone ?? "",
+        adTitle:         o.ad?.title ?? "",
         deliveryAddress: o.deliveryAddress ?? "",
-        createdAt: o.createdAt,
+        createdAt:       o.createdAt,
       })),
       meta: { total, page: Number(page), limit: Number(limit) },
     });
@@ -85,30 +86,27 @@ export const createOrder = async (req, res) => {
     if (!ad) return res.status(404).json({ message: "Ad not found" });
 
     const order = await Order.create({
-      buyer: buyerId,
-      vendor: ad.postedBy,
-      ad: adId,
-      items,
-      total,
-      currency,
-      deliveryAddress,
-      txRef,
+      buyer: buyerId, vendor: ad.postedBy, ad: adId,
+      items, total, currency, deliveryAddress, txRef,
       status: "pending",
     });
 
     res.status(201).json({ message: "Order placed successfully", order });
 
-    // ── SMS to vendor (non-blocking) ──────────────────────────────────────
-    const sym = currency === "NGN" ? "₦" : "₵";
-    const vendor = await User.findById(ad.postedBy)
-      .select("phone username")
-      .lean();
+    // ── SMS to vendor — category-aware message ────────────────────────────
+    const sym    = currency === "NGN" ? "₦" : "₵";
+    const vendor = await User.findById(ad.postedBy).select("phone username").lean();
     if (vendor?.phone) {
-      sendSMS(
-        vendor.phone,
-        `SmileBaba: New order for "${ad.title}" — ${sym}${Number(total).toLocaleString()}. ` +
-          `Log in to confirm: https://smilebabahub.com/vendor/orders`,
-      ).catch((e) => console.error("[SMS order]", e.message));
+      const isDelivery = ad.category?.main === "delivery";
+      const smsBody = isDelivery
+        ? `SmileBaba: New delivery booking! ${sym}${Number(total).toLocaleString()}. ` +
+          `Route: ${String(deliveryAddress || "").replace("Pickup: ", "").slice(0, 80)}. ` +
+          `Confirm: https://smilebabahub.com/vendor/orders`
+        : `SmileBaba: New order for "${ad.title}" — ${sym}${Number(total).toLocaleString()}. ` +
+          `Log in to confirm: https://smilebabahub.com/vendor/orders`;
+
+      sendSMS(vendor.phone, smsBody)
+        .catch((e) => console.error("[SMS order]", e.message));
     }
   } catch (err) {
     console.error("createOrder error:", err);
@@ -120,7 +118,7 @@ export const createOrder = async (req, res) => {
 export const updateOrderStatus = async (req, res) => {
   try {
     const { status } = req.body;
-    const valid = ["confirmed", "delivered", "cancelled"];
+    const valid = ["confirmed", "dispatched", "delivered", "cancelled"];
     if (!valid.includes(status)) {
       return res.status(400).json({ message: "Invalid status" });
     }
@@ -140,14 +138,21 @@ export const updateOrderStatus = async (req, res) => {
     // ── SMS to buyer on status change ──────────────────────────────────────
     const buyer = await User.findById(order.buyer).select("phone").lean();
     if (buyer?.phone) {
+      const orderAd = await Ad.findById(order.ad).select("category.main").lean();
+      const isDelivery = orderAd?.category?.main === "delivery";
+
       const msgs = {
-        confirmed: `SmileBaba: Your order has been confirmed! The vendor will deliver soon.`,
-        delivered: `SmileBaba: Your order has been delivered. Enjoy! 🎉`,
-        cancelled: `SmileBaba: Your order was cancelled. Contact support if this is unexpected.`,
+        confirmed:  isDelivery
+          ? `SmileBaba: Your rider has confirmed! They will collect your item soon. 🛵`
+          : `SmileBaba: Your order has been confirmed! The vendor will deliver soon.`,
+        dispatched: `SmileBaba: Your rider is on the way! 🛵 Track progress via SmileBaba.`,
+        delivered:  isDelivery
+          ? `SmileBaba: Delivery complete! Your item has arrived. 📦`
+          : `SmileBaba: Your order has been delivered. Enjoy! 🎉`,
+        cancelled:  `SmileBaba: Your order was cancelled. Contact support if this is unexpected.`,
       };
-      sendSMS(buyer.phone, msgs[status]).catch((e) =>
-        console.error("[SMS order status]", e.message),
-      );
+      sendSMS(buyer.phone, msgs[status])
+        .catch((e) => console.error("[SMS order status]", e.message));
     }
   } catch (err) {
     console.error("updateOrderStatus error:", err);

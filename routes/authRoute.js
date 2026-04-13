@@ -1,23 +1,29 @@
-import express from "express";
-
-
-const router = express.Router();
-
 // routes/authRoutes.js
-
-import rateLimit     from "express-rate-limit";
+import express from "express";
+import rateLimit from "express-rate-limit";
 import { ipKeyGenerator } from "express-rate-limit";
 import {
-  register, login, getCurrentUser, refresh,
-  logout, forgotPassword, resetPassword,
-  getGuestCountry, adminSwitchCountry,
-  updateProfile, changePassword, updateNotifications,
-  updatePaymentDetails, updateShipping, submitPromotion,
+  register,
+  login,
+  getCurrentUser,
+  refresh,
+  logout,
+  forgotPassword,
+  resetPassword,
+  getGuestCountry,
+  adminSwitchCountry,
+  updateProfile,
+  changePassword,
+  updateNotifications,
+  updatePaymentDetails,
+  updateShipping,
+  submitPromotion,
+  resendOTP,
+  verifyOTP,
 } from "../controllers/authController.js";
-import authMiddleware from "../middleware/authMiddleWare.js";
+import { authenticate } from "../middleware/authMiddleWare.js";
 
-
-
+const router = express.Router();
 
 // ── IP resolver (inlined — no separate file) ──────────────────────────────
 function resolveClientIP(req) {
@@ -31,58 +37,74 @@ function resolveClientIP(req) {
 // ── Tight rate limiters for sensitive auth endpoints ──────────────────────
 // Login / register: 10 attempts per 15 min per IP — prevents brute force
 const authLimiter = rateLimit({
-  windowMs:        15 * 60 * 1000,
-  max:             10,
-  message:         { message: "Too many attempts. Please try again in 15 minutes." },
-  keyGenerator:    (req) => ipKeyGenerator(resolveClientIP(req)),
-  validate:        { trustProxy: false },
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { message: "Too many attempts. Please try again in 15 minutes." },
+  keyGenerator: (req) => ipKeyGenerator(resolveClientIP(req)),
+  validate: { trustProxy: false },
   standardHeaders: true,
-  legacyHeaders:   false,
+  legacyHeaders: false,
 });
 
 // Password reset: 5 per hour — prevents email flooding
 const resetLimiter = rateLimit({
-  windowMs:        60 * 60 * 1000,
-  max:             5,
-  message:         { message: "Too many password reset requests. Try again in 1 hour." },
-  keyGenerator:    (req) => ipKeyGenerator(resolveClientIP(req)),
-  validate:        { trustProxy: false },
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  message: {
+    message: "Too many password reset requests. Try again in 1 hour.",
+  },
+  keyGenerator: (req) => ipKeyGenerator(resolveClientIP(req)),
+  validate: { trustProxy: false },
   standardHeaders: true,
-  legacyHeaders:   false,
+  legacyHeaders: false,
 });
 
 // Token refresh: 60 per 15 min — legitimate apps refresh frequently
 const refreshLimiter = rateLimit({
-  windowMs:        15 * 60 * 1000,
-  max:             60,
-  keyGenerator:    (req) => ipKeyGenerator(resolveClientIP(req)),
-  validate:        { trustProxy: false },
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  keyGenerator: (req) => ipKeyGenerator(resolveClientIP(req)),
+  validate: { trustProxy: false },
   standardHeaders: true,
-  legacyHeaders:   false,
+  legacyHeaders: false,
 });
 
 // ── Public ────────────────────────────────────────────────────────────────
-router.post("/register",        authLimiter,    register);
-router.post("/login",           authLimiter,    login);
-router.post("/refresh",         refreshLimiter, refresh);
-router.post("/forgot-password", resetLimiter,   forgotPassword);
-router.post("/reset-password",  resetLimiter,   resetPassword);
+router.post("/register", authLimiter, register);
+router.post("/login", authLimiter, login);
+router.post("/refresh", refreshLimiter, refresh);
+router.post("/forgot-password", resetLimiter, forgotPassword);
+router.post("/reset-password", resetLimiter, resetPassword);
+
+// ── Phone OTP verification (optional — post-registration phone verify) ────
+// Tight rate limit: 5 OTP sends per 15 min to prevent SMS flooding
+const otpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { message: "Too many OTP requests. Try again in 15 minutes." },
+  keyGenerator: (req) => ipKeyGenerator(resolveClientIP(req)),
+  validate: { trustProxy: false },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+router.post("/resend-otp", otpLimiter, resendOTP);
+router.post("/verify-otp", otpLimiter, verifyOTP);
 
 // Guest country detection — low impact, no sensitive data
-router.get("/guest-country",    getGuestCountry);
+router.get("/guest-country", getGuestCountry);
 
 // ── Protected ─────────────────────────────────────────────────────────────
-router.get("/me",               authMiddleware, getCurrentUser);
-router.post("/logout",          authMiddleware, logout);
-router.patch("/admin/country",    authMiddleware, adminSwitchCountry);
+router.get("/me", authenticate, getCurrentUser);
+router.post("/logout", authenticate, logout);
+router.patch("/admin/country", authenticate, adminSwitchCountry);
 
 // ── Vendor settings ────────────────────────────────────────────────────────
-router.patch("/profile",          authMiddleware, updateProfile);
-router.patch("/password",         authMiddleware, changePassword);
-router.patch("/notifications",    authMiddleware, updateNotifications);
-router.patch("/payment-details",  authMiddleware, updatePaymentDetails);
-router.patch("/shipping",         authMiddleware, updateShipping);
-router.post("/promotion",         authMiddleware, submitPromotion);
-
+router.patch("/profile", authenticate, updateProfile);
+router.patch("/password", authenticate, changePassword);
+router.patch("/notifications", authenticate, updateNotifications);
+router.patch("/payment-details", authenticate, updatePaymentDetails);
+router.patch("/shipping", authenticate, updateShipping);
+router.post("/promotion", authenticate, submitPromotion);
 
 export default router;

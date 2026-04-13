@@ -29,7 +29,7 @@ const orderSchema = new mongoose.Schema(
     currency: { type: String, enum: ["GHS", "NGN"], default: "GHS" },
     status: {
       type: String,
-      enum: ["pending", "confirmed", "delivered", "cancelled"],
+      enum: ["pending", "confirmed", "dispatched", "delivered", "cancelled"],
       default: "pending",
     },
     deliveryAddress: { type: String, default: "" },

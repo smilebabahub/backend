@@ -11,9 +11,9 @@ import {
 
 const router = express.Router();
 
-router.get("/my", authMiddleware, getMyBookings);
-router.get("/vendor", authMiddleware, requireVendor, getVendorBookings);
-router.post("/", authMiddleware, createBooking);
+router.get("/my",           authMiddleware,              getMyBookings);
+router.get("/vendor",       authMiddleware, requireVendor, getVendorBookings);
+router.post("/",            authMiddleware,              createBooking);
 router.patch("/:id/status", authMiddleware, requireVendor, updateBookingStatus);
 
 export default router;
