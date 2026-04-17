@@ -1035,3 +1035,459 @@ export const sendBulkEmail = async (req, res) => {
     console.error("[bulk email] Job error:", err);
   }
 };
+
+// ══════════════════════════════════════════════════════════════════════════
+// BUSINESS ANALYTICS — DETAILED REPORTING FOR DECISION MAKING
+// ══════════════════════════════════════════════════════════════════════════
+
+// ── GET /admin/analytics/business ─────────────────────────────────────────
+// Comprehensive business analytics combining revenue, growth, retention,
+// product performance and geographic insights.
+// Query params: country (Ghana|Nigeria|all), days (7|14|30|90)
+export const getBusinessAnalytics = async (req, res) => {
+  try {
+    const country = req.query.country ?? "all";
+    const days    = Math.min(90, Math.max(7, parseInt(req.query.days ?? "30", 10)));
+    const since   = new Date(Date.now() - days * 86400000);
+    const prev    = new Date(Date.now() - days * 2 * 86400000);
+
+    const countryFilter  = (field = "country") =>
+      country !== "all" ? { [field]: country } : {};
+
+    const purchaseMatch  = { status: "successful", createdAt: { $gte: since } };
+    const prevPurchMatch = { status: "successful", createdAt: { $gte: prev, $lt: since } };
+    if (country !== "all") { purchaseMatch.currency  = country === "Ghana" ? "GHS" : "NGN"; prevPurchMatch.currency = purchaseMatch.currency; }
+
+    const [
+      // Revenue
+      revenueByType,
+      revenuePrev,
+      revenueByPlan,
+      revenueByDay,
+      revenueByBillingCycle,
+
+      // Users & growth
+      newUsersCount,
+      prevUsersCount,
+      usersByRole,
+      usersByCountry,
+      vendorsByPlan,
+
+      // Ads & engagement
+      adsByCategory,
+      topViewedAds,
+      adConversionByCategory,
+      newAdsCount,
+      prevAdsCount,
+
+      // Payments
+      paymentSuccessRate,
+      paymentsByGateway,
+      avgOrderValue,
+
+      // Marketers & referrals
+      marketerRevenue,
+      topMarketers,
+      referralConversion,
+
+      // Retention
+      activeVendors,
+      expiringVendors,
+      churnedVendors,
+    ] = await Promise.all([
+
+      // ── Revenue by type (subscription vs boost) ──────────────────────────
+      Purchase.aggregate([
+        { $match: purchaseMatch },
+        { $group: {
+          _id:   { type: "$type", currency: "$currency" },
+          total: { $sum: "$amount" },
+          count: { $sum: 1 },
+        }},
+      ]),
+
+      // ── Previous period revenue (for % change) ───────────────────────────
+      Purchase.aggregate([
+        { $match: prevPurchMatch },
+        { $group: { _id: "$currency", total: { $sum: "$amount" } } },
+      ]),
+
+      // ── Revenue broken down by subscription plan ─────────────────────────
+      Purchase.aggregate([
+        { $match: { ...purchaseMatch, type: "subscription" } },
+        { $group: {
+          _id:   { planId: "$planId", currency: "$currency" },
+          total: { $sum: "$amount" },
+          count: { $sum: 1 },
+          avgAmount: { $avg: "$amount" },
+        }},
+        { $sort: { total: -1 } },
+      ]),
+
+      // ── Daily revenue trend ───────────────────────────────────────────────
+      Purchase.aggregate([
+        { $match: purchaseMatch },
+        { $group: {
+          _id: {
+            date:     { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+            currency: "$currency",
+          },
+          total: { $sum: "$amount" },
+          count: { $sum: 1 },
+        }},
+        { $sort: { "_id.date": 1 } },
+      ]),
+
+      // ── Monthly vs annual billing split ──────────────────────────────────
+      Purchase.aggregate([
+        { $match: { ...purchaseMatch, type: "subscription" } },
+        { $group: {
+          _id:   "$billingCycle",
+          total: { $sum: "$amount" },
+          count: { $sum: 1 },
+        }},
+      ]),
+
+      // ── New user registrations ────────────────────────────────────────────
+      User.countDocuments({
+        createdAt: { $gte: since },
+        ...countryFilter("country"),
+      }),
+      User.countDocuments({
+        createdAt: { $gte: prev, $lt: since },
+        ...countryFilter("country"),
+      }),
+
+      // ── Users by role ─────────────────────────────────────────────────────
+      User.aggregate([
+        { $match: country !== "all" ? { country } : {} },
+        { $group: { _id: "$role", count: { $sum: 1 } } },
+      ]),
+
+      // ── Users by country ──────────────────────────────────────────────────
+      User.aggregate([
+        { $group: { _id: "$country", count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+      ]),
+
+      // ── Active vendors by subscription plan ──────────────────────────────
+      User.aggregate([
+        { $match: {
+          role: "vendor",
+          "subscription.expiresAt": { $gt: new Date() },
+          ...countryFilter("country"),
+        }},
+        { $group: { _id: "$subscription.plan", count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+      ]),
+
+      // ── Ads by category ───────────────────────────────────────────────────
+      Ad.aggregate([
+        { $match: country !== "all" ? { "location.country": country } : {} },
+        { $group: {
+          _id:          "$category.main",
+          total:        { $sum: 1 },
+          active:       { $sum: { $cond: ["$isActive", 1, 0] } },
+          totalViews:   { $sum: "$views" },
+          totalContacts:{ $sum: "$contactClicks" },
+          boosted:      { $sum: { $cond: ["$boost.isBoosted", 1, 0] } },
+        }},
+        { $sort: { total: -1 } },
+      ]),
+
+      // ── Top 10 best performing ads ────────────────────────────────────────
+      Ad.find({
+        isActive: true,
+        views: { $gt: 0 },
+        ...(country !== "all" ? { "location.country": country } : {}),
+      })
+        .sort({ views: -1 })
+        .limit(10)
+        .select("title category.main location.country views contactClicks boost.isBoosted price.amount price.currency postedBy createdAt")
+        .populate("postedBy", "username")
+        .lean(),
+
+      // ── Contact conversion rate by category ──────────────────────────────
+      Ad.aggregate([
+        { $match: {
+          isActive: true,
+          views: { $gt: 10 },
+          ...(country !== "all" ? { "location.country": country } : {}),
+        }},
+        { $group: {
+          _id:          "$category.main",
+          totalViews:   { $sum: "$views" },
+          totalContacts:{ $sum: "$contactClicks" },
+          adCount:      { $sum: 1 },
+        }},
+        { $addFields: {
+          conversionRate: {
+            $cond: [
+              { $gt: ["$totalViews", 0] },
+              { $multiply: [{ $divide: ["$totalContacts", "$totalViews"] }, 100] },
+              0,
+            ],
+          },
+        }},
+        { $sort: { conversionRate: -1 } },
+      ]),
+
+      // ── New ads posted in period ──────────────────────────────────────────
+      Ad.countDocuments({
+        createdAt: { $gte: since },
+        ...(country !== "all" ? { "location.country": country } : {}),
+      }),
+      Ad.countDocuments({
+        createdAt: { $gte: prev, $lt: since },
+        ...(country !== "all" ? { "location.country": country } : {}),
+      }),
+
+      // ── Payment success vs fail ───────────────────────────────────────────
+      Purchase.aggregate([
+        { $match: { createdAt: { $gte: since }, ...(country !== "all" ? { currency: country === "Ghana" ? "GHS" : "NGN" } : {}) } },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
+
+      // ── Revenue by gateway (gh/ng/intl) ──────────────────────────────────
+      Purchase.aggregate([
+        { $match: purchaseMatch },
+        { $group: {
+          _id:   "$currency",
+          total: { $sum: "$amount" },
+          count: { $sum: 1 },
+        }},
+      ]),
+
+      // ── Average order value ───────────────────────────────────────────────
+      Purchase.aggregate([
+        { $match: purchaseMatch },
+        { $group: { _id: "$currency", avg: { $avg: "$amount" }, count: { $sum: 1 } } },
+      ]),
+
+      // ── Marketer commission totals ────────────────────────────────────────
+      Purchase.aggregate([
+        { $match: { ...purchaseMatch, marketerId: { $ne: null } } },
+        { $group: {
+          _id:        "$currency",
+          totalComm:  { $sum: { $multiply: ["$amount", 0.15] } },
+          totalRev:   { $sum: "$amount" },
+          count:      { $sum: 1 },
+        }},
+      ]),
+
+      // ── Top 5 marketers by revenue generated ─────────────────────────────
+      Purchase.aggregate([
+        { $match: { ...purchaseMatch, marketerId: { $ne: null } } },
+        { $group: {
+          _id:     "$marketerId",
+          revenue: { $sum: "$amount" },
+          count:   { $sum: 1 },
+          currency:{ $first: "$currency" },
+        }},
+        { $sort: { revenue: -1 } },
+        { $limit: 5 },
+        { $lookup: {
+          from:         "marketers",
+          localField:   "_id",
+          foreignField: "_id",
+          as:           "marketer",
+        }},
+        { $unwind: { path: "$marketer", preserveNullAndEmpty: true } },
+        { $project: {
+          name:     { $ifNull: ["$marketer.name", "Unknown"] },
+          revenue:  1,
+          count:    1,
+          currency: 1,
+          commission: { $multiply: ["$revenue", 0.15] },
+        }},
+      ]),
+
+      // ── Referral → vendor conversion ─────────────────────────────────────
+      Marketer.aggregate([
+        { $group: {
+          _id:         null,
+          totalCodes:  { $sum: 1 },
+          usedCodes:   { $sum: { $cond: [{ $gt: ["$totalReferrals", 0] }, 1, 0] } },
+          totalRefs:   { $sum: "$totalReferrals" },
+          totalEarned: { $sum: "$totalEarned" },
+        }},
+      ]),
+
+      // ── Currently active vendors ──────────────────────────────────────────
+      User.countDocuments({
+        role: "vendor",
+        "subscription.expiresAt": { $gt: new Date() },
+        "subscription.plan": { $ne: "Basic" },
+        ...countryFilter("country"),
+      }),
+
+      // ── Vendors expiring in next 7 days ───────────────────────────────────
+      User.countDocuments({
+        role: "vendor",
+        "subscription.expiresAt": {
+          $gt: new Date(),
+          $lt: new Date(Date.now() + 7 * 86400000),
+        },
+        ...countryFilter("country"),
+      }),
+
+      // ── Vendors whose subscription expired in period (churn) ─────────────
+      User.countDocuments({
+        role: "vendor",
+        "subscription.expiresAt": {
+          $gte: since,
+          $lt: new Date(),
+        },
+        ...countryFilter("country"),
+      }),
+    ]);
+
+    // ── Post-process revenue ──────────────────────────────────────────────
+    const revByCurrency = {};
+    for (const r of revenueByType) {
+      const c = r._id.currency;
+      if (!revByCurrency[c]) revByCurrency[c] = { subscription: 0, boost: 0, total: 0, count: 0 };
+      revByCurrency[c][r._id.type] += r.total;
+      revByCurrency[c].total       += r.total;
+      revByCurrency[c].count       += r.count;
+    }
+
+    const prevRevByCurrency = {};
+    for (const r of revenuePrev) {
+      prevRevByCurrency[r._id] = r.total;
+    }
+
+    const revenueChange = {};
+    for (const [cur, data] of Object.entries(revByCurrency)) {
+      const prev = prevRevByCurrency[cur] ?? 0;
+      revenueChange[cur] = prev > 0
+        ? +((data.total - prev) / prev * 100).toFixed(1)
+        : data.total > 0 ? 100 : 0;
+    }
+
+    // ── Post-process daily revenue into a unified trend ───────────────────
+    const dailyRevMap = {};
+    for (const r of revenueByDay) {
+      const date = r._id.date;
+      if (!dailyRevMap[date]) dailyRevMap[date] = { date, GHS: 0, NGN: 0, count: 0 };
+      dailyRevMap[date][r._id.currency] = r.total;
+      dailyRevMap[date].count += r.count;
+    }
+    const dailyRevenue = Object.values(dailyRevMap).sort((a, b) => a.date.localeCompare(b.date));
+
+    // ── Payment funnel ────────────────────────────────────────────────────
+    const paymentFunnel = {};
+    for (const p of paymentSuccessRate) paymentFunnel[p._id] = p.count;
+    const totalPay  = Object.values(paymentFunnel).reduce((a, b) => a + b, 0);
+    const successPay = paymentFunnel["successful"] ?? 0;
+
+    // ── User growth % ────────────────────────────────────────────────────
+    const userGrowthPct = prevUsersCount > 0
+      ? +((newUsersCount - prevUsersCount) / prevUsersCount * 100).toFixed(1)
+      : newUsersCount > 0 ? 100 : 0;
+
+    // ── Ad growth % ──────────────────────────────────────────────────────
+    const adGrowthPct = prevAdsCount > 0
+      ? +((newAdsCount - prevAdsCount) / prevAdsCount * 100).toFixed(1)
+      : newAdsCount > 0 ? 100 : 0;
+
+    res.status(200).json({
+      meta: { country, days, generatedAt: new Date().toISOString() },
+
+      revenue: {
+        byCurrency:    revByCurrency,
+        changePercent: revenueChange,
+        byPlan:        revenueByPlan.map((r) => ({
+          plan:     r._id.planId,
+          currency: r._id.currency,
+          total:    r.total,
+          count:    r.count,
+          avgValue: +r.avgAmount.toFixed(0),
+        })),
+        byBillingCycle: revenueByBillingCycle.map((r) => ({
+          cycle: r._id ?? "unknown",
+          total: r.total,
+          count: r.count,
+        })),
+        dailyTrend: dailyRevenue,
+        avgOrderValue: avgOrderValue.map((r) => ({
+          currency: r._id,
+          avg:      +r.avg.toFixed(0),
+          count:    r.count,
+        })),
+        byGateway: paymentsByGateway.map((r) => ({
+          currency: r._id,
+          total:    r.total,
+          count:    r.count,
+        })),
+      },
+
+      growth: {
+        newUsers:      newUsersCount,
+        userGrowthPct,
+        newAds:        newAdsCount,
+        adGrowthPct,
+        usersByRole:   usersByRole.reduce((acc, r) => { acc[r._id] = r.count; return acc; }, {}),
+        usersByCountry:usersByCountry.map((r) => ({ country: r._id, count: r.count })),
+        vendorsByPlan: vendorsByPlan.map((r) => ({ plan: r._id, count: r.count })),
+      },
+
+      engagement: {
+        byCategory:           adsByCategory,
+        topAds:               topViewedAds.map((a) => ({
+          title:          a.title,
+          category:       a.category?.main,
+          country:        a.location?.country,
+          views:          a.views,
+          contacts:       a.contactClicks,
+          conversion:     a.views > 0 ? +((a.contactClicks / a.views) * 100).toFixed(1) : 0,
+          boosted:        a.boost?.isBoosted ?? false,
+          price:          a.price?.amount,
+          currency:       a.price?.currency,
+          vendor:         a.postedBy?.username ?? "—",
+          postedAt:       a.createdAt,
+        })),
+        conversionByCategory: adConversionByCategory.map((r) => ({
+          category:       r._id,
+          views:          r.totalViews,
+          contacts:       r.totalContacts,
+          conversionRate: +r.conversionRate.toFixed(1),
+          adCount:        r.adCount,
+        })),
+      },
+
+      payments: {
+        total:         totalPay,
+        successful:    successPay,
+        failed:        paymentFunnel["failed"] ?? 0,
+        pending:       paymentFunnel["pending"] ?? 0,
+        successRate:   totalPay > 0 ? +((successPay / totalPay) * 100).toFixed(1) : 0,
+      },
+
+      marketers: {
+        commissionByCurrency: marketerRevenue.map((r) => ({
+          currency:   r._id,
+          totalRev:   r.totalRev,
+          commission: +r.totalComm.toFixed(0),
+          count:      r.count,
+        })),
+        topMarketers,
+        referralStats: referralConversion[0] ?? {
+          totalCodes: 0, usedCodes: 0, totalRefs: 0, totalEarned: 0,
+        },
+      },
+
+      retention: {
+        activeVendors,
+        expiringInWeek: expiringVendors,
+        churnedInPeriod: churnedVendors,
+        churnRate: activeVendors + churnedVendors > 0
+          ? +((churnedVendors / (activeVendors + churnedVendors)) * 100).toFixed(1)
+          : 0,
+      },
+    });
+  } catch (err) {
+    logError("getBusinessAnalytics", err);
+    res.status(500).json({ message: "Failed to load business analytics" });
+  }
+};

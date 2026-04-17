@@ -40,8 +40,14 @@ const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
   message: { message: "Too many attempts. Please try again in 15 minutes." },
-  keyGenerator: (req) => ipKeyGenerator(resolveClientIP(req)),
-  validate: { trustProxy: false },
+  keyGenerator: (req) => {
+    const ip = resolveClientIP(req) || req.ip || "127.0.0.1";
+    try {
+      return ipKeyGenerator(ip);
+    } catch {
+      return ip;
+    }
+  },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -53,8 +59,14 @@ const resetLimiter = rateLimit({
   message: {
     message: "Too many password reset requests. Try again in 1 hour.",
   },
-  keyGenerator: (req) => ipKeyGenerator(resolveClientIP(req)),
-  validate: { trustProxy: false },
+  keyGenerator: (req) => {
+    const ip = resolveClientIP(req) || req.ip || "127.0.0.1";
+    try {
+      return ipKeyGenerator(ip);
+    } catch {
+      return ip;
+    }
+  },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -63,8 +75,14 @@ const resetLimiter = rateLimit({
 const refreshLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 60,
-  keyGenerator: (req) => ipKeyGenerator(resolveClientIP(req)),
-  validate: { trustProxy: false },
+  keyGenerator: (req) => {
+    const ip = resolveClientIP(req) || req.ip || "127.0.0.1";
+    try {
+      return ipKeyGenerator(ip);
+    } catch {
+      return ip;
+    }
+  },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -82,8 +100,14 @@ const otpLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
   message: { message: "Too many OTP requests. Try again in 15 minutes." },
-  keyGenerator: (req) => ipKeyGenerator(resolveClientIP(req)),
-  validate: { trustProxy: false },
+  keyGenerator: (req) => {
+    const ip = resolveClientIP(req) || req.ip || "127.0.0.1";
+    try {
+      return ipKeyGenerator(ip);
+    } catch {
+      return ip;
+    }
+  },
   standardHeaders: true,
   legacyHeaders: false,
 });

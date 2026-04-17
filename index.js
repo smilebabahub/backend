@@ -159,10 +159,15 @@ app.use(
     // by switching between IPv4 and IPv6 representations of the same address.
     // We pass it the real visitor IP (from CF-Connecting-IP) not the proxy IP.
     keyGenerator: (req) => {
-      const ip = resolveClientIP(req) || req.ip || "unknown";
-      return ipKeyGenerator(ip);
+      // resolveClientIP returns "" for loopback in dev — fall back to req.ip
+      const ip = resolveClientIP(req) || req.ip || "127.0.0.1";
+      // ipKeyGenerator normalises IPv4/IPv6 representations
+      try {
+        return ipKeyGenerator(ip);
+      } catch {
+        return ip;
+      }
     },
-    validate: { trustProxy: false },
     standardHeaders: true,
     legacyHeaders: false,
   }),
