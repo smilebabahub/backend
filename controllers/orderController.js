@@ -136,9 +136,12 @@ export const updateOrderStatus = async (req, res) => {
     res.status(200).json({ message: "Order status updated", order });
 
     // ── SMS to buyer on status change ──────────────────────────────────────
-    const buyer = await User.findById(order.buyer).select("phone").lean();
+    // Batch buyer + ad lookup — cuts round-trips from 2 to 1
+    const [buyer, orderAd] = await Promise.all([
+      User.findById(order.buyer).select("phone").lean(),
+      Ad.findById(order.ad).select("category.main").lean(),
+    ]);
     if (buyer?.phone) {
-      const orderAd = await Ad.findById(order.ad).select("category.main").lean();
       const isDelivery = orderAd?.category?.main === "delivery";
 
       const msgs = {

@@ -1,6 +1,7 @@
 // controllers/analyticsController.js
 // Handles page view tracking from the frontend and live stats for admin.
 
+import { safeRedis } from "../lib/redis.js";
 import Analytics from "../models/analytics.js";
 import { onlineUsers } from "../lib/socketHandler.js";
 
@@ -75,8 +76,24 @@ export const trackPageView = async (req, res) => {
 // ── GET /admin/analytics/live ──────────────────────────────────────────────
 // Returns live stats for the admin dashboard.
 // Called every 30s by the admin panel via SSE or polling.
+// Cached for 15s in Redis — prevents 10 aggregations/minute when multiple
+// admin tabs are open.
+const LIVE_CACHE_KEY = "analytics:live";
+const LIVE_CACHE_TTL = 15; // seconds
+
 export const getLiveAnalytics = async (req, res) => {
+  // For SSE we stream — can't cache at the HTTP level, but cache the DB work
   try {
+    // Try cache first
+    const cached = await safeRedis((c) => c.get(LIVE_CACHE_KEY));
+    if (cached) {
+      const data = JSON.parse(cached);
+      // Merge fresh online count (always real-time)
+      const { onlineUsers } = await import("../lib/socketHandler.js");
+      data.onlineNow = onlineUsers?.size ?? 0;
+      return res.status(200).json(data);
+    }
+
     const now = new Date();
     const last24h = new Date(now - 24 * 60 * 60 * 1000);
     const last1h = new Date(now - 60 * 60 * 1000);
@@ -148,7 +165,7 @@ export const getLiveAnalytics = async (req, res) => {
     const onlineCount = onlineUsers.size;
     const onlineUserIds = Array.from(onlineUsers.keys());
 
-    res.status(200).json({
+    const payload = {
       live: {
         onlineNow: onlineCount,
         onlineUsers: onlineUserIds,
@@ -173,7 +190,18 @@ export const getLiveAnalytics = async (req, res) => {
         })),
       },
       recentActivity,
-    });
+    };
+
+    // Cache breakdown + recent activity for 15s (online count is always fresh)
+    const cachePayload = {
+      ...payload,
+      live: { ...payload.live, onlineNow: 0, onlineUsers: [] },
+    };
+    safeRedis((c) =>
+      c.setEx(LIVE_CACHE_KEY, LIVE_CACHE_TTL, JSON.stringify(cachePayload)),
+    ).catch(() => {});
+
+    res.status(200).json(payload);
   } catch (error) {
     console.error("getLiveAnalytics error:", error);
     res.status(500).json({ message: "Failed to load analytics" });

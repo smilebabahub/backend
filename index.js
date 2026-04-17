@@ -29,7 +29,7 @@ import analyticsRoutes from "./routes/analyticsRoutes.js";
 import marketerRoutes, { updatesRouter } from "./routes/marketerRoute.js";
 import adBoostPaymentRoutes from "./routes/adBoostPaymentRoute.js";
 
-import authMiddleware from "./middleware/authMiddleWare.js";
+import { authenticate as authMiddleware } from "./middleware/authMiddleWare.js";
 import { checkReferralCode } from "./controllers/paymentController.js";
 import { connectRedis } from "./lib/redis.js";
 import { startSubscriptionCron } from "./cron/subscriptionExpiry.js";
@@ -115,7 +115,8 @@ app.use(
 );
 
 // ── Security / logging ────────────────────────────────────────────────────────
-app.use(helmet());
+// Single helmet call — crossOriginResourcePolicy: false so Cloudinary
+// images can load cross-origin without being blocked
 app.use(helmet({ crossOriginResourcePolicy: false }));
 app.use(morgan("common"));
 app.use("/uploads", express.static("uploads"));
@@ -212,6 +213,18 @@ app.use("/smilebaba/orders", orderRoutes);
 app.use("/smilebaba/bookings", bookingRoutes);
 app.use("/smilebaba/admin", adminRoutes);
 app.use("/smilebaba/analytics", analyticsRoutes); // page view tracking
+
+// ── Health check — used by BackendWakeUp component + uptime monitors ─────
+// Returns 200 immediately — just proves the server is awake.
+app.get("/smilebaba/health", (_req, res) =>
+  res
+    .status(200)
+    .json({
+      status: "ok",
+      uptime: Math.floor(process.uptime()),
+      ts: Date.now(),
+    }),
+);
 app.get(
   "/smilebaba/payments/referral/:code",
   authMiddleware,
@@ -257,11 +270,6 @@ await connectRedis().catch((e) =>
   console.warn("Redis unavailable — SSE disabled:", e.message),
 );
 startSubscriptionCron();
-
-// ── Health check ──────────────────────────────────────────────────────────────
-app.get("/smilebaba/health", (_req, res) =>
-  res.json({ status: "ok", ts: new Date().toISOString() }),
-);
 
 // ── 404 + global error ────────────────────────────────────────────────────────
 app.use((_req, res) => res.status(404).json({ message: "Route not found" }));

@@ -225,14 +225,66 @@ const getLocationFromIP = async (ip) => {
   }
 };
 
+// ── Resolve country for authenticated requests ────────────────────────────
+// For logged-in users, priority:
+//   1. cf-ipcountry (instant, if behind Cloudflare)
+//   2. User's stored country (reliable — set correctly at registration)
+//   3. IP-based detection via ip-api.com (free, ~200ms, fallback for Render)
+//   4. "Ghana" default
+// This is async because of the IP fallback.
+async function resolveCountryForUser(req, user) {
+  // 1. Cloudflare header — instant, zero cost
+  const cf = resolveCountryFromCF(req);
+  if (cf.detected) return cf.country;
+
+  // 2. User's stored country (most reliable for returning users)
+  if (user?.country && ["Ghana", "Nigeria"].includes(user.country)) {
+    return user.country;
+  }
+
+  // 3. IP-based fallback — used on Render when not behind Cloudflare
+  try {
+    const ip = resolveClientIP(req);
+    const isPrivate =
+      !ip ||
+      ip === "::1" ||
+      ip.startsWith("127.") ||
+      ip.startsWith("192.168.") ||
+      ip.startsWith("10.");
+    if (!isPrivate) {
+      const geoRes = await axios.get(
+        `http://ip-api.com/json/${ip}?fields=status,countryCode`,
+        { timeout: 2500 },
+      );
+      if (geoRes.data.status === "success") {
+        if (geoRes.data.countryCode === "NG") return "Nigeria";
+        if (geoRes.data.countryCode === "GH") return "Ghana";
+      }
+    }
+  } catch {
+    /* fall through */
+  }
+
+  // 4. Default
+  return "Ghana";
+}
+
 // ── Cookie options helper ──────────────────────────────────────────────────
+// isProd detection is robust — NODE_ENV alone is not reliable on Render.
+// We also check RENDER (Render sets this) and PORT (all cloud platforms set this).
+// SameSite="none" + Secure=true is REQUIRED for cross-domain cookies
+// (frontend on smilebabahub.com, backend on smilebababackend.onrender.com).
 const cookieOptions = () => {
-  const isProd = process.env.NODE_ENV === "production";
+  const isProd =
+    process.env.NODE_ENV === "production" ||
+    !!process.env.RENDER || // Render always sets RENDER=true
+    (process.env.PORT !== undefined && process.env.PORT !== "3001"); // dev uses 3001, prod uses random port
   return {
     httpOnly: true,
     secure: isProd,
     sameSite: isProd ? "none" : "lax",
     path: "/",
+    // maxAge is set per-call so we don't put it here
   };
 };
 
@@ -282,9 +334,15 @@ export const register = async (req, res) => {
       ],
     });
 
+    // Country: CF header first (instant), then IP-detected geo, then default
+    const cfResult = resolveCountryFromCF(req);
+    const countryForSer = cfResult.detected
+      ? cfResult.country
+      : geoData?.country || "Ghana";
+
     res.status(200).json({
       message: "Registration successful",
-      user: serializeUser(user, resolveCountryFromCF(req).country),
+      user: serializeUser(user, countryForSer),
     });
 
     // Send welcome emails (fire-and-forget — never blocks the response)
@@ -313,9 +371,8 @@ export const login = async (req, res) => {
         .status(400)
         .json({ message: "Incorrect username and password" });
 
-    // Use cf-ipcountry for instant reliable country detection (no Geoapify call)
-    // Still call Geoapify for city/location detail in loginHistory (non-blocking)
-    const { country: liveCountry } = resolveCountryFromCF(req);
+    // Resolve country robustly — CF header first, stored country fallback, IP fallback
+    const liveCountry = await resolveCountryForUser(req, user);
     const ip = resolveClientIP(req);
 
     // Sync admin role if needed
@@ -390,7 +447,7 @@ export const getCurrentUser = async (req, res) => {
     const user = await User.findById(req.user.userId);
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    const { country: liveCountry } = resolveCountryFromCF(req);
+    const liveCountry = await resolveCountryForUser(req, user);
     res.status(200).json({ user: serializeUser(user, liveCountry) });
   } catch (error) {
     res.status(500).json({ message: "Server error" });
@@ -570,12 +627,65 @@ export const getGuestLocation = async (req, res) => {
 };
 
 // ── GUEST COUNTRY (/auth/guest-country) ───────────────────────────────────
-// Called by GuestLocationDetector on app mount for unauthenticated visitors.
-// Uses Cloudflare's cf-ipcountry header — instant, free, always accurate.
-// No Geoapify call needed. Falls back to Ghana only if not behind Cloudflare.
+// Priority:
+//   1. cf-ipcountry header (instant, Cloudflare CDN — when proxied through CF)
+//   2. X-Forwarded-For IP → ip-api.com lookup (Render without CF, ~200ms)
+//   3. Ghana fallback (detected: false, frontend won't cache it)
 export const getGuestCountry = async (req, res) => {
-  const result = resolveCountryFromCF(req);
-  res.json(result);
+  // 1. Try Cloudflare header first (zero latency)
+  const cfResult = resolveCountryFromCF(req);
+  if (cfResult.detected) {
+    return res.json(cfResult);
+  }
+
+  // 2. Fall back to IP-based detection via free ip-api.com
+  // (no API key required, 45 req/min limit — sufficient for our scale)
+  try {
+    const ip = resolveClientIP(req);
+    // Skip loopback / private IPs (dev environment)
+    const isPrivate =
+      !ip ||
+      ip === "::1" ||
+      ip.startsWith("127.") ||
+      ip.startsWith("192.168.") ||
+      ip.startsWith("10.");
+    if (!isPrivate) {
+      const geoRes = await axios.get(
+        `http://ip-api.com/json/${ip}?fields=status,country,countryCode`,
+        { timeout: 3000 },
+      );
+      if (geoRes.data.status === "success") {
+        const code = (geoRes.data.countryCode || "").toUpperCase();
+        if (code === "NG")
+          return res.json({
+            country: "Nigeria",
+            currency: "NGN",
+            symbol: "₦",
+            detected: true,
+            detectedFrom: `ip-api:${ip}`,
+          });
+        if (code === "GH")
+          return res.json({
+            country: "Ghana",
+            currency: "GHS",
+            symbol: "₵",
+            detected: true,
+            detectedFrom: `ip-api:${ip}`,
+          });
+      }
+    }
+  } catch {
+    // ip-api.com unreachable — fall through to default
+  }
+
+  // 3. Default to Ghana (detected: false so frontend doesn't cache)
+  return res.json({
+    country: "Ghana",
+    currency: "GHS",
+    symbol: "₵",
+    detected: false,
+    detectedFrom: "fallback",
+  });
 };
 
 // ── ADMIN: SWITCH COUNTRY VIEW ──────────────────────────────────────────────

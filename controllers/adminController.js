@@ -1,11 +1,12 @@
 // controllers/adminController.js
-import User     from "../models/user.js";
-import Purchase from "../models/purchaseModel.js";
-import Marketer from "../models/marketerModel.js";
-import Ad       from "../models/adModel.js";
-import Stats    from "../models/statsModel.js";
+import User       from "../models/user.js";
+import Purchase   from "../models/purchaseModel.js";
+import Marketer   from "../models/marketerModel.js";
+import Ad         from "../models/adModel.js";
+import Stats      from "../models/statsModel.js";
 import Analytics  from "../models/analytics.js";
 import { logError, getErrors, clearErrors, getErrorSummary } from "../lib/errorLog.js";
+import { safeRedis } from "../lib/redis.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 const parsePage  = (q) => Math.max(1, parseInt(q ?? "1",  10));
@@ -16,6 +17,11 @@ const parseLimit = (q) => Math.min(100, Math.max(1, parseInt(q ?? "20", 10)));
 export const getOverview = async (req, res) => {
   try {
     const country = req.query.country;   // "Ghana" | "Nigeria" | undefined (all)
+
+    // Cache overview for 60s — headline stats don't need per-second accuracy
+    const cacheKey = `admin:overview:${country || "all"}`;
+    const cached = await safeRedis((c) => c.get(cacheKey));
+    if (cached) return res.status(200).json(JSON.parse(cached));
 
     const [
       totalUsers,
@@ -71,7 +77,7 @@ export const getOverview = async (req, res) => {
       if (cur === "NGN" && type === "boost")        boostNGN = row.total;
     }
 
-    res.status(200).json({
+    const overviewPayload = {
       stats: {
         totalUsers,
         totalVendors,
@@ -89,7 +95,11 @@ export const getOverview = async (req, res) => {
       },
       recentUsers,
       recentPurchases,
-    });
+    };
+
+    // Cache for 60s — avoids hammering DB on dashboard refreshes
+    safeRedis((c) => c.setEx(cacheKey, 60, JSON.stringify(overviewPayload))).catch(() => {});
+    res.status(200).json(overviewPayload);
   } catch (error) {
     logError("getOverview", error);
     res.status(500).json({ message: "Failed to load overview" });
