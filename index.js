@@ -249,8 +249,12 @@ const io = new Server(server, {
     methods: ["GET", "POST"],
     credentials: true,
   },
-  // Only handle socket.io upgrade requests — not SSE routes
   allowEIO3: true,
+  pingTimeout: 60000, // 60s before considering connection dead
+  pingInterval: 25000, // ping every 25s
+  upgradeTimeout: 10000, // wait 10s for transport upgrade
+  maxHttpBufferSize: 1e6, // 1MB max message
+  transports: ["polling", "websocket"], // polling first on server too
 });
 
 // Prevent Socket.IO from intercepting SSE connections on /smilebaba/updates.

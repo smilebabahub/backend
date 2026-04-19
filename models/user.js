@@ -191,6 +191,9 @@ const userSchema = new Schema(
     // ── Social ─────────────────────────────────────────────────────────────────
     instagram: { type: String, default: "" },
     facebook: { type: String, default: "" },
+    twitter: { type: String, default: "" }, // X / Twitter handle
+    tiktok: { type: String, default: "" },
+    youtube: { type: String, default: "" },
     whatsapp: { type: String, default: "" },
 
     // ── Store policies ─────────────────────────────────────────────────────────
@@ -287,4 +290,4 @@ userSchema.index({ storeSlug: 1 }, { sparse: true });
 userSchema.index({ createdAt: -1 });
 
 // ── Export ─────────────────────────────────────────────────────────────────
-export default mongoose.models.User || mongoose.model("User", userSchema);
+export default mongoose.models.User ?? mongoose.model("User", userSchema);

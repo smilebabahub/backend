@@ -161,6 +161,9 @@ const serializeUser = (user, liveCountry) => {
     // ── Social ────────────────────────────────────────────────────────────
     instagram: obj.instagram ?? "",
     facebook: obj.facebook ?? "",
+    twitter: obj.twitter ?? "",
+    tiktok: obj.tiktok ?? "",
+    youtube: obj.youtube ?? "",
     whatsapp: obj.whatsapp ?? "",
 
     // ── Store policies ────────────────────────────────────────────────────
