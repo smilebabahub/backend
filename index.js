@@ -64,6 +64,45 @@ app.use(express.json({ limit: "30mb" }));
 app.use(express.urlencoded({ extended: true, limit: "30mb" }));
 app.use(cookieParser());
 
+// ── Required env var check ───────────────────────────────────────────────────
+// Fail loud at startup rather than silently returning 500s in production.
+const REQUIRED_ENV = [
+  "MONGO_URI",
+  "JWT_ACCESS_SECRET",
+  "JWT_REFRESH_SECRET",
+  "FLW_SECRET_KEY", // OR FLW_SECRET_KEY_GH / FLW_SECRET_KEY_NG
+  "FLW_WEBHOOK_SECRET", // OR FLW_WEBHOOK_SECRET_GH / FLW_WEBHOOK_SECRET_NG
+];
+
+const missing = REQUIRED_ENV.filter((k) => {
+  // Allow either the base key OR a country-specific variant
+  if (k === "FLW_SECRET_KEY") {
+    return (
+      !process.env.FLW_SECRET_KEY &&
+      !process.env.FLW_SECRET_KEY_GH &&
+      !process.env.FLW_SECRET_KEY_NG
+    );
+  }
+  if (k === "FLW_WEBHOOK_SECRET") {
+    return (
+      !process.env.FLW_WEBHOOK_SECRET &&
+      !process.env.FLW_WEBHOOK_SECRET_GH &&
+      !process.env.FLW_WEBHOOK_SECRET_NG
+    );
+  }
+  return !process.env[k];
+});
+
+if (missing.length) {
+  console.error(
+    "\n[server] ❌ Missing required environment variables:\n" +
+      missing.map((k) => `  • ${k}`).join("\n") +
+      "\n\nAdd them to Render → Environment → Add environment variable\n",
+  );
+  // Don't crash in dev — just warn
+  if (process.env.NODE_ENV === "production") process.exit(1);
+}
+
 // ── CORS ──────────────────────────────────────────────────────────────────────
 // Exact origins always allowed
 // Extra origins from env — comma-separated, e.g.:

@@ -10,7 +10,7 @@ import {
   verifyGatewayPayment,
   verifyWebhookSignature,
 } from "../lib/paymentGateway.js";
-import { publish, CHANNELS } from "../lib/redis.js";
+import { publish, CHANNELS, safeRedis } from "../lib/redis.js";
 import { sendSubscriptionEmails } from "../lib/emailService.js";
 import { pushToUser } from "../lib/socketHandler.js";
 
@@ -109,6 +109,15 @@ async function activateSubscription({
     { upsert: true, new: true },
   );
 
+  // Bust admin overview cache so revenue updates immediately
+  safeRedis((c) =>
+    Promise.all([
+      c.del("admin:overview:all"),
+      c.del("admin:overview:Ghana"),
+      c.del("admin:overview:Nigeria"),
+    ]),
+  ).catch(() => {});
+
   // Notification (deduped by key)
   await Notification.findOneAndUpdate(
     { dedupeKey: `activated-${txRef}` },
@@ -181,6 +190,46 @@ async function activateSubscription({
 }
 
 // Fire subscription emails (non-blocking)
+// ── Payment failure email ────────────────────────────────────────────────────
+async function sendPaymentFailureEmail({
+  userId,
+  planId,
+  billingCycle,
+  reason,
+}) {
+  try {
+    const user = await User.findById(userId).select("email username").lean();
+    if (!user?.email) return;
+
+    const planTitle = PLAN_NAMES[planId] ?? planId;
+    const reasonMap = {
+      not_successful:
+        "Your payment did not complete. No money was taken from your account.",
+      amount_mismatch:
+        "We detected an amount discrepancy. Please contact support if money was deducted.",
+      missing_meta: "A technical error occurred. Please retry your payment.",
+      server_error:
+        "Our server encountered an error. Please try again in a few minutes.",
+    };
+    const reasonText =
+      reasonMap[reason] ?? "Your payment could not be processed.";
+
+    await sendSubscriptionEmails({
+      username: user.username,
+      email: user.email,
+      planTitle,
+      billingCycle: billingCycle ?? "monthly",
+      amount: 0,
+      currency: "GHS",
+      expiresAt: null,
+      failed: true,
+      failureReason: reasonText,
+    });
+  } catch (e) {
+    console.error("[paymentController] failure email error:", e.message);
+  }
+}
+
 async function sendSubEmailsForUser({
   userId,
   planId,
@@ -198,10 +247,12 @@ async function sendSubEmailsForUser({
       username: user.username,
       email: user.email,
       planTitle: title,
+      planId,
       billingCycle,
       amount: payment.amount,
       currency: payment.currency,
       expiresAt,
+      failed: false,
     });
   } catch (e) {
     console.error("[paymentController] subscription email error:", e.message);
@@ -396,7 +447,16 @@ export const initializePayment = async (req, res) => {
       marketerId: marketerId ?? null,
     });
 
-    const redirect_url = `${process.env.NEXT_PUBLIC_APP_URL}/payment-success?countryCode=${countryCode}&returnUrl=${encodeURIComponent(returnUrl || "/vendor/dashboard")}`;
+    // Redirect Flutterwave back to our OWN verify endpoint — NOT directly to the frontend.
+    // verifyPayment checks the payment, activates the subscription, then forwards the user.
+    // Pattern: FLW → /payments/{country}/verify → (activate) → /vendor/dashboard?subscribed=1
+    const backendBase =
+      process.env.BACKEND_URL ??
+      process.env.NEXT_PUBLIC_API_BASE_URL?.replace("/smilebaba", "") ??
+      "http://localhost:3001";
+    const verifyPath = `/smilebaba/payments/${countryCode.toLowerCase()}/verify`;
+    const encodedReturn = encodeURIComponent(returnUrl || "/vendor/dashboard");
+    const redirect_url = `${backendBase}${verifyPath}?returnUrl=${encodedReturn}`;
 
     const payload = {
       tx_ref,
@@ -453,6 +513,10 @@ export const verifyPayment = async (req, res) => {
       transactionId: transaction_id,
     });
 
+    // ── Extract meta FIRST — needed for both success and failure redirects ──
+    const meta = payment.meta ?? payment.metadata ?? {};
+    const { userId, planId, billingCycle, marketerId } = meta;
+
     console.log(
       "[verifyPayment] payment object:",
       JSON.stringify({
@@ -461,20 +525,25 @@ export const verifyPayment = async (req, res) => {
         amount: payment.amount,
         currency: payment.currency,
         tx_ref: payment.tx_ref,
-        meta: payment.meta,
+        meta,
       }),
     );
 
     if (payment.status !== "successful") {
       console.warn("[verifyPayment] not successful:", payment.status);
+      // Send failure email if we have enough context
+      if (userId && planId) {
+        sendPaymentFailureEmail({
+          userId,
+          planId,
+          billingCycle,
+          reason: "not_successful",
+        }).catch(() => {});
+      }
       return res.redirect(
-        `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=not_successful`,
+        `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=not_successful${planId ? "&plan=" + planId : ""}`,
       );
     }
-
-    // Meta can be at payment.meta (normalised) or nested variants
-    const meta = payment.meta ?? payment.metadata ?? {};
-    const { userId, planId, billingCycle, marketerId } = meta;
 
     if (!userId || !planId || !billingCycle) {
       console.error("[verifyPayment] missing meta fields:", {
@@ -504,7 +573,7 @@ export const verifyPayment = async (req, res) => {
         billingCycle,
       });
       return res.redirect(
-        `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=amount_mismatch`,
+        `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=amount_mismatch${meta?.planId ? "&plan=" + meta.planId : ""}`,
       );
     }
 
@@ -602,7 +671,18 @@ export const paymentWebhook = async (req, res) => {
           billingCycle,
           txRef: data.tx_ref,
         });
-        return res.status(200).end(); // return 200 — don't let FLW retry forever
+        // Still try to activate if diff is within 10% (rounding/FX difference)
+        const pctDiff = expected > 0 ? diff / expected : 1;
+        if (pctDiff > 0.1) {
+          sendPaymentFailureEmail({
+            userId,
+            planId,
+            billingCycle,
+            reason: "amount_mismatch",
+          }).catch(() => {});
+          return res.status(200).end();
+        }
+        console.warn("[paymentWebhook] diff within 10% — activating anyway");
       }
 
       const expiresAt = await activateSubscription({

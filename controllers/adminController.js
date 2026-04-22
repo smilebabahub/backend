@@ -1292,7 +1292,7 @@ export const getBusinessAnalytics = async (req, res) => {
           foreignField: "_id",
           as:           "marketer",
         }},
-        { $unwind: { path: "$marketer", preserveNullAndEmpty: true } },
+        { $unwind: { path: "$marketer", preserveNullAndEmptyArrays: true } },
         { $project: {
           name:     { $ifNull: ["$marketer.name", "Unknown"] },
           revenue:  1,

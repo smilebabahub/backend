@@ -21,10 +21,43 @@ export const PRICING = {
   },
 };
 
+
 // Human-readable plan names for notifications and receipts
 export const PLAN_NAMES = {
-  Basic: "Smile (Free)",
+  Basic:    "Smile (Free)",
   standard: "BasicSmile",
-  popular: "HappySmile",
-  premium: "SuperSmile",
+  popular:  "HappySmile",
+  premium:  "SuperSmile",
 };
+
+// ── Per-plan ad limits ────────────────────────────────────────────────────────
+export const PLAN_AD_LIMITS = {
+  Basic:    1,
+  standard: 5,
+  popular:  10,
+  premium:  Infinity,
+};
+
+// ── Per-plan ad duration in days ─────────────────────────────────────────────
+export const PLAN_AD_DURATION_DAYS = {
+  Basic:    3,
+  standard: 30,
+  popular:  30,
+  premium:  60,
+};
+
+export function getPlanLimit(planId) {
+  return PLAN_AD_LIMITS[planId] ?? 3;
+}
+
+export function getPlanDurationDays(planId) {
+  return PLAN_AD_DURATION_DAYS[planId] ?? 14;
+}
+
+// Human-readable plan names for notifications and receipts
+// export const PLAN_NAMES = {
+//   Basic: "Smile (Free)",
+//   standard: "BasicSmile",
+//   popular: "HappySmile",
+//   premium: "SuperSmile",
+// };

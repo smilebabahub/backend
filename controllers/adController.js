@@ -4,7 +4,12 @@ import mongoose from "mongoose";
 import Ad from "../models/adModel.js";
 import User from "../models/user.js";
 import Notification from "../models/notificationModel.js";
-import { PRICING, PLAN_NAMES } from "../config/pricing.js";
+import {
+  PRICING,
+  PLAN_NAMES,
+  getPlanLimit,
+  getPlanDurationDays,
+} from "../config/pricing.js";
 import cloudinary, { deleteImages } from "../lib/cloudinary.js";
 import {
   bustFeedCache,
@@ -17,8 +22,7 @@ import {
 
 /** Calculate listing expiry date based on vendor's subscription plan */
 function getExpiryDate(planId) {
-  const daysMap = { Basic: 3, standard: 30, popular: 30, premium: 30 };
-  const days = daysMap[planId] ?? 3;
+  const days = getPlanDurationDays(planId); // Basic=3, standard=30, popular=30, premium=60
   return new Date(Date.now() + days * 86400000);
 }
 
@@ -205,6 +209,28 @@ export const createAd = async (req, res) => {
     const planName = PLAN_NAMES[planId] ?? "Smile";
     const expiresAt = getExpiryDate(planId);
 
+    // ── Plan limit check — count active listings ──────────────────────────
+    const limit = getPlanLimit(planId);
+    if (isFinite(limit)) {
+      const activeCount = await Ad.countDocuments({
+        postedBy: userId,
+        isActive: true,
+        expiresAt: { $gt: new Date() },
+      });
+      if (activeCount >= limit) {
+        return res.status(403).json({
+          message:
+            `Your ${PLAN_NAMES[planId]} plan allows ${limit} active listing${limit === 1 ? "" : "s"}. ` +
+            `You currently have ${activeCount}. Upgrade your plan to post more.`,
+          code: "PLAN_LIMIT_REACHED",
+          limit,
+          current: activeCount,
+          planId,
+          upgradeUrl: "/subscription",
+        });
+      }
+    }
+
     const {
       title,
       description,
@@ -259,7 +285,7 @@ export const createAd = async (req, res) => {
         package: planName,
         startedAt: new Date(),
         expiresAt,
-        listingDays: planId === "Basic" ? 3 : 30,
+        listingDays: getPlanDurationDays(planId),
       },
       moderation: { status: "approved" },
       isActive: true,
