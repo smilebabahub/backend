@@ -24,7 +24,7 @@ import {
   verifyGatewayPayment,
   verifyWebhookSignature,
 } from "../lib/paymentGateway.js";
-import { sendBoostEmails } from "../lib/emailService.js";
+import { sendBoostEmails, sendBoostReceipt } from "../lib/emailService.js";
 
 // ── Activate boost on an ad ────────────────────────────────────────────────
 async function activateAdBoost({ adId, tier, txRef, payment }) {
@@ -97,6 +97,20 @@ async function activateAdBoost({ adId, tier, txRef, payment }) {
         amount: payment.amount,
         currency: payment.currency,
       }).catch((e) => console.error("[boost] email error:", e.message));
+
+      // Send purchase receipt
+      sendBoostReceipt({
+        username: vendor.username,
+        email: vendor.email,
+        adTitle: ad.title,
+        adId: String(adId),
+        tier,
+        tierLabel: BOOST_TIER_NAMES[tier],
+        days,
+        amount: payment.amount,
+        currency: payment.currency,
+        txRef: payment.tx_ref ?? payment.txRef,
+      }).catch((e) => console.error("[boost] receipt error:", e.message));
     }
   }
 

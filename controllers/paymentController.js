@@ -11,7 +11,11 @@ import {
   verifyWebhookSignature,
 } from "../lib/paymentGateway.js";
 import { publish, CHANNELS, safeRedis } from "../lib/redis.js";
-import { sendSubscriptionEmails } from "../lib/emailService.js";
+import {
+  sendSubscriptionEmails,
+  sendSubscriptionReceipt,
+  sendBoostReceipt,
+} from "../lib/emailService.js";
 import { pushToUser } from "../lib/socketHandler.js";
 
 const REFERRAL_DISCOUNT = 0.15; // 15% commission to marketer, 15% discount to vendor
@@ -254,6 +258,20 @@ async function sendSubEmailsForUser({
       expiresAt,
       failed: false,
     });
+
+    // Send purchase receipt (separate branded email with receipt number)
+    sendSubscriptionReceipt({
+      username: user.username,
+      email: user.email,
+      planId,
+      planTitle: title,
+      billingCycle,
+      amount: payment.amount,
+      currency: payment.currency,
+      txRef: payment.tx_ref ?? payment.txRef,
+      expiresAt,
+      isUpgrade: false,
+    }).catch(() => {});
   } catch (e) {
     console.error("[paymentController] subscription email error:", e.message);
   }
@@ -561,20 +579,44 @@ export const verifyPayment = async (req, res) => {
       ? applyDiscount(baseAmount, true)
       : baseAmount;
 
-    // Tolerance check — allow ±1 unit to cover floating-point and rounding
-    // differences between Flutterwave charged_amount and our calculated price
-    const diff = Math.abs(payment.amount - expectedAmount);
-    if (diff > 1) {
-      console.error("[verifyPayment] amount mismatch", {
+    // ── Amount tolerance check ────────────────────────────────────────────
+    // Flutterwave often charges slightly more than the base price due to:
+    //   - Payment processing fees added by FLW (~1-3%)
+    //   - MoMo/card network surcharges (e.g. MTN adds a convenience fee)
+    //   - Currency rounding differences
+    //
+    // Strategy: accept if the paid amount is within 5% of expected OR
+    // if the paid amount is AT LEAST the expected amount (customer paid more — OK).
+    // Only reject if they paid significantly LESS than expected (potential fraud).
+    const diff = payment.amount - expectedAmount; // positive = overpaid, negative = underpaid
+    const absDiff = Math.abs(diff);
+    const pctDiff = expectedAmount > 0 ? absDiff / expectedAmount : 1;
+
+    // Accept: overpaid (FLW fee on top), or within 5% tolerance
+    // Reject: underpaid by more than 5%
+    if (diff < 0 && pctDiff > 0.05) {
+      console.error("[verifyPayment] underpayment detected", {
         paid: payment.amount,
         expected: expectedAmount,
         diff,
+        pctDiff: (pctDiff * 100).toFixed(1) + "%",
         planId,
         billingCycle,
+        currency: payment.currency,
       });
       return res.redirect(
-        `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=amount_mismatch${meta?.planId ? "&plan=" + meta.planId : ""}`,
+        `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=amount_mismatch${planId ? "&plan=" + planId : ""}`,
       );
+    }
+
+    // Log overcharge for awareness (FLW processing fees) but DO NOT reject
+    if (diff > 0) {
+      console.log("[verifyPayment] overpayment (likely FLW processing fee)", {
+        paid: payment.amount,
+        expected: expectedAmount,
+        surplus: diff.toFixed(2),
+        planId,
+      });
     }
 
     const expiresAt = await activateSubscription({
@@ -661,28 +703,35 @@ export const paymentWebhook = async (req, res) => {
       const base = PRICING[planId]?.[billingCycle]?.[data.currency];
       const expected = marketerId ? applyDiscount(base, true) : base;
 
-      const diff = Math.abs(amount - expected);
-      if (diff > 1) {
-        console.error("[paymentWebhook] amount mismatch", {
+      const wDiff = amount - expected; // positive = overpaid
+      const wAbsDiff = Math.abs(wDiff);
+      const wPctDiff = expected > 0 ? wAbsDiff / expected : 1;
+
+      // Reject only if underpaid by more than 5%
+      if (wDiff < 0 && wPctDiff > 0.05) {
+        console.error("[paymentWebhook] underpayment", {
           paid: amount,
           expected,
-          diff,
+          diff: wDiff,
+          pct: (wPctDiff * 100).toFixed(1) + "%",
           planId,
           billingCycle,
-          txRef: data.tx_ref,
         });
-        // Still try to activate if diff is within 10% (rounding/FX difference)
-        const pctDiff = expected > 0 ? diff / expected : 1;
-        if (pctDiff > 0.1) {
-          sendPaymentFailureEmail({
-            userId,
-            planId,
-            billingCycle,
-            reason: "amount_mismatch",
-          }).catch(() => {});
-          return res.status(200).end();
-        }
-        console.warn("[paymentWebhook] diff within 10% — activating anyway");
+        sendPaymentFailureEmail({
+          userId,
+          planId,
+          billingCycle,
+          reason: "amount_mismatch",
+        }).catch(() => {});
+        return res.status(200).end();
+      }
+      if (wDiff > 0) {
+        console.log("[paymentWebhook] overpayment (FLW fee)", {
+          paid: amount,
+          expected,
+          surplus: wDiff.toFixed(2),
+          planId,
+        });
       }
 
       const expiresAt = await activateSubscription({

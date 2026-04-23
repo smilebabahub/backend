@@ -221,9 +221,14 @@ export const getSubscriptions = async (req, res) => {
     const currency = req.query.currency;   // "GHS" | "NGN"
     const planId   = req.query.planId;
 
-    const filter = { status: "successful" };
+    const type   = req.query.type;     // "subscription" | "boost" | undefined
+    const status = req.query.status ?? "successful";  // allow filtering by any status
+
+    const filter = {};
+    if (status)   filter.status   = status;
     if (currency) filter.currency = currency;
     if (planId)   filter.planId   = planId;
+    if (type)     filter.type     = type;
 
     // If searching, match user first
     if (search) {
@@ -846,6 +851,122 @@ export const generateReport = async (req, res) => {
   } catch (err) {
     logError("generateReport", err, { period: req.query.period });
     res.status(500).json({ message: "Failed to generate report" });
+  }
+};
+
+// ── PATCH /admin/subscriptions/:userId/grant ──────────────────────────────
+// Admin manually grants or corrects a vendor subscription.
+// Used when a payment succeeded on Flutterwave but didn't reflect in the DB.
+export const grantSubscription = async (req, res) => {
+  try {
+    const { userId }      = req.params;
+    const { planId, billingCycle, notes } = req.body;
+
+    if (!planId || !billingCycle) {
+      return res.status(400).json({ message: "planId and billingCycle are required" });
+    }
+
+    const { PRICING, PLAN_NAMES } = await import("../config/pricing.js");
+
+    if (!PRICING[planId]) {
+      return res.status(400).json({ message: `Unknown planId: ${planId}` });
+    }
+
+    const user = await User.findById(userId).select("username email role subscription").lean();
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const now       = new Date();
+    const expiresAt = billingCycle === "monthly"
+      ? new Date(new Date(now).setMonth(now.getMonth() + 1))
+      : new Date(new Date(now).setFullYear(now.getFullYear() + 1));
+
+    const title = `${PLAN_NAMES[planId] ?? planId} ${
+      billingCycle === "monthly" ? "Monthly" : "Yearly"
+    } Plan`;
+
+    // Update user role + subscription
+    const currentRole = user.role === "admin" ? "admin" : "vendor";
+    await User.findByIdAndUpdate(userId, {
+      $set: {
+        role:         currentRole,
+        isSubscribed: true,
+        subscription: {
+          plan:        planId,
+          billingCycle,
+          price:       0,             // admin grant — no payment
+          currency:    "GHS",
+          startedAt:   now,
+          expiresAt,
+          status:      "active",
+          grantedBy:   req.user?.userId ?? "admin",
+          grantNotes:  notes ?? "Admin grant",
+        },
+      },
+    });
+
+    // Create an audit Purchase record so history shows the grant
+    const txRef = `admin-grant-${userId}-${Date.now()}`;
+    await Purchase.findOneAndUpdate(
+      { txRef },
+      {
+        $setOnInsert: { createdAt: now },
+        $set: {
+          user:          userId,
+          txRef,
+          type:          "subscription",
+          transactionId: "admin-grant",
+          title:         `[Admin Grant] ${title}`,
+          planId,
+          billingCycle,
+          amount:        0,
+          currency:      "GHS",
+          status:        "successful",
+          periodStart:   now,
+          periodEnd:     expiresAt,
+        },
+      },
+      { upsert: true, new: true }
+    );
+
+    // Bust cache
+    safeRedis((c) => Promise.all([
+      c.del("admin:overview:all"),
+      c.del("admin:overview:Ghana"),
+      c.del("admin:overview:Nigeria"),
+    ])).catch(() => {});
+
+    // Notify the user
+    await Notification.findOneAndUpdate(
+      { dedupeKey: `grant-${txRef}` },
+      {
+        user:        userId,
+        type:        "subscription_activated",
+        title:       "Subscription activated by admin",
+        message:     `Your ${title} has been activated by the SmileBaba team.`,
+        actionUrl:   "/vendor/dashboard",
+        actionLabel: "Go to dashboard",
+        dedupeKey:   `grant-${txRef}`,
+      },
+      { upsert: true }
+    );
+
+    // Log admin action
+    logError("adminGrant", null, {
+      grantedTo:    userId,
+      grantedBy:    req.user?.userId,
+      planId,
+      billingCycle,
+      notes,
+    });
+
+    res.status(200).json({
+      message:   `${title} granted to ${user.username ?? user.email}`,
+      expiresAt,
+      txRef,
+    });
+  } catch (error) {
+    logError("grantSubscription", error);
+    res.status(500).json({ message: "Failed to grant subscription" });
   }
 };
 

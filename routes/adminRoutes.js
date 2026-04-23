@@ -26,6 +26,7 @@ import {
   getBusinessAnalytics,
   getSystemHealth,
   generateReport,
+  grantSubscription,
   getSystemErrors,
   clearSystemErrors,
 } from "../controllers/adminController.js";
@@ -40,6 +41,7 @@ router.get("/users", getUsers);
 router.get("/users/:id", getUserDetail);
 router.patch("/users/:id/role", setUserRole);
 router.get("/subscriptions", getSubscriptions);
+router.patch("/subscriptions/:userId/grant", grantSubscription);
 router.get("/marketers", getMarketers);
 router.patch("/marketers/:id/payout", markMarketerPaidOut);
 router.get("/ads", getAds);
