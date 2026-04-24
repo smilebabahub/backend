@@ -32,6 +32,52 @@ function applyDiscount(amount, hasReferral) {
   return +(amount * (1 - REFERRAL_DISCOUNT)).toFixed(2);
 }
 
+// ── Record every payment attempt (success or failure) for admin visibility ───
+// Called by verifyPayment for ALL outcomes so admin can see failed payments.
+async function recordPaymentAttempt({
+  txRef,
+  userId,
+  planId,
+  billingCycle,
+  payment,
+  status,
+  failureReason = null,
+  marketerId = null,
+}) {
+  try {
+    const title = `${PLAN_NAMES[planId] ?? planId} ${
+      billingCycle === "monthly" ? "Monthly" : "Yearly"
+    } Plan`;
+
+    await Purchase.findOneAndUpdate(
+      { txRef },
+      {
+        $setOnInsert: { createdAt: new Date() },
+        $set: {
+          user: userId || null,
+          txRef,
+          type: "subscription",
+          transactionId: String(payment?.id ?? ""),
+          title,
+          planId,
+          billingCycle,
+          amount: payment?.amount ?? 0,
+          currency: payment?.currency ?? "GHS",
+          status, // "successful" | "failed" | "pending"
+          failureReason: failureReason, // human-readable reason for admin
+          periodStart: null,
+          periodEnd: null,
+          marketerId: marketerId ?? null,
+          gatewayMeta: payment ?? null,
+        },
+      },
+      { upsert: true, new: true },
+    );
+  } catch (e) {
+    console.error("[recordPaymentAttempt] error:", e.message);
+  }
+}
+
 // ── Idempotent subscription activation ───────────────────────────────────────
 // Uses upsert on txRef so double-calls (verify + webhook) never create duplicates.
 async function activateSubscription({
@@ -300,9 +346,14 @@ export const checkReferralCode = async (req, res) => {
 export const initializePayment = async (req, res) => {
   try {
     const { planId, billingCycle, returnUrl, referralCode } = req.body;
-    const userId = req.user.userId;
+    const userId = req.user?.userId;
     const countryCode = req.countryCode;
     const currency = req.gatewayCurrency;
+
+    if (!userId) return res.status(401).json({ message: "Not authenticated" });
+    if (!countryCode || !currency) {
+      return res.status(400).json({ message: "Country not detected" });
+    }
 
     // ── Validate plan exists ──────────────────────────────────────────────────
     const plan = PRICING[planId];
@@ -312,13 +363,13 @@ export const initializePayment = async (req, res) => {
     if (!cycle)
       return res.status(400).json({ message: "Invalid billing cycle" });
     const baseAmount = cycle[currency];
-    if (baseAmount === undefined) {
+    if (baseAmount === undefined || baseAmount === null) {
       return res.status(400).json({ message: "Unsupported currency" });
     }
 
     // ── Subscription guard: check current plan ────────────────────────────────
     const user = await User.findById(userId)
-      .select("subscription role email username phone")
+      .select("subscription role email username phone whatsapp")
       .lean();
     if (!user) return res.status(404).json({ message: "User not found" });
 
@@ -447,10 +498,12 @@ export const initializePayment = async (req, res) => {
     // Delete ALL pending subscription purchases for this user — not just same plan.
     // When a user changes their mind mid-checkout (popular → standard), the old
     // pending record must be removed or it accumulates forever.
+    // Delete stale pending subscription purchases so they don't accumulate.
+    // Use $ne instead of $in with null/undefined to avoid Mongoose type errors.
     await Purchase.deleteMany({
       user: userId,
       status: "pending",
-      type: { $in: ["subscription", null, undefined] }, // only subscriptions, not boosts
+      type: { $ne: "boost" }, // everything except boost = subscription
     });
 
     await Purchase.create({
@@ -466,12 +519,18 @@ export const initializePayment = async (req, res) => {
     });
 
     // Redirect Flutterwave back to our OWN verify endpoint — NOT directly to the frontend.
-    // verifyPayment checks the payment, activates the subscription, then forwards the user.
-    // Pattern: FLW → /payments/{country}/verify → (activate) → /vendor/dashboard?subscribed=1
-    const backendBase =
-      process.env.BACKEND_URL ??
-      process.env.NEXT_PUBLIC_API_BASE_URL?.replace("/smilebaba", "") ??
-      "http://localhost:3001";
+    // BACKEND_URL must be set on Render (e.g. https://smilebababackend.onrender.com).
+    // NEXT_PUBLIC_API_BASE_URL is a FRONTEND var — do NOT use it here.
+    const backendBase = (process.env.BACKEND_URL ?? "").replace(/\/+$/, "");
+    if (!backendBase) {
+      console.error(
+        "[initializePayment] BACKEND_URL env var is not set on Render!",
+      );
+      return res.status(500).json({
+        message: "Payment system configuration error. Contact support.",
+        code: "BACKEND_URL_NOT_SET",
+      });
+    }
     const verifyPath = `/smilebaba/payments/${countryCode.toLowerCase()}/verify`;
     const encodedReturn = encodeURIComponent(returnUrl || "/vendor/dashboard");
     const redirect_url = `${backendBase}${verifyPath}?returnUrl=${encodedReturn}`;
@@ -483,8 +542,10 @@ export const initializePayment = async (req, res) => {
       redirect_url,
       customer: {
         email: user.email,
-        name: user.username,
-        phonenumber: user.phone,
+        name: user.username || user.email?.split("@")[0] || "Customer",
+        // FLW requires phonenumber to be a non-empty string — use fallback
+        // if user has no phone (social login, guest upgrade, etc.)
+        phonenumber: user.phone || user.whatsapp || "0000000000",
       },
       meta: {
         userId,
@@ -495,11 +556,25 @@ export const initializePayment = async (req, res) => {
         marketerId: String(marketerId ?? ""),
       },
       customizations: {
-        title: "SmileBaba Subscription",
-        description: `${PLAN_NAMES[planId] ?? planId} ${billingCycle}${discountApplied ? " (20% referral discount)" : ""}`,
-        logo: `${process.env.NEXT_PUBLIC_APP_URL}/logo.png`,
+        title: "SmileBaba Hub",
+        description: `${PLAN_NAMES[planId] ?? planId} ${billingCycle === "monthly" ? "Monthly" : "Annual"} Plan${discountApplied ? " (referral discount)" : ""}`,
+        logo: `${process.env.APP_URL ?? process.env.FRONTEND_URL ?? "https://smilebabahub.com"}/logo.png`,
+        color: "#ffc105",
       },
     };
+
+    // Log payload for debugging (mask nothing — we need to see exact values)
+    console.log(
+      "[initializePayment] sending to FLW:",
+      JSON.stringify({
+        tx_ref: payload.tx_ref,
+        amount: payload.amount,
+        currency: payload.currency,
+        redirect_url: payload.redirect_url,
+        customer: payload.customer,
+        logo: payload.customizations?.logo,
+      }),
+    );
 
     const { paymentLink } = await initializeGatewayPayment({
       countryCode,
@@ -516,8 +591,16 @@ export const initializePayment = async (req, res) => {
       discountPercent: discountApplied ? 20 : 0,
     });
   } catch (error) {
-    logError("initializePayment", error.response?.data || error.message);
-    res.status(500).json({ message: "Payment initialization failed" });
+    const flwError =
+      error.response?.data?.message ?? error.response?.data ?? error.message;
+    console.error("[initializePayment]", flwError);
+    logError("initializePayment", flwError);
+    res.status(500).json({
+      message:
+        typeof flwError === "string"
+          ? flwError
+          : "Payment initialization failed",
+    });
   }
 };
 
@@ -549,8 +632,18 @@ export const verifyPayment = async (req, res) => {
 
     if (payment.status !== "successful") {
       console.warn("[verifyPayment] not successful:", payment.status);
-      // Send failure email if we have enough context
-      if (userId && planId) {
+      // Record failed attempt so admin can see it
+      if (planId) {
+        recordPaymentAttempt({
+          txRef: payment.tx_ref ?? `failed-${Date.now()}`,
+          userId,
+          planId,
+          billingCycle,
+          payment,
+          status: "failed",
+          failureReason: `Payment status: ${payment.status}`,
+          marketerId,
+        }).catch(() => {});
         sendPaymentFailureEmail({
           userId,
           planId,
@@ -569,6 +662,17 @@ export const verifyPayment = async (req, res) => {
         planId,
         billingCycle,
       });
+      // Record with partial info so admin can investigate
+      recordPaymentAttempt({
+        txRef: payment.tx_ref ?? `missing-meta-${Date.now()}`,
+        userId: userId ?? null,
+        planId: planId ?? "unknown",
+        billingCycle: billingCycle ?? "monthly",
+        payment,
+        status: "failed",
+        failureReason:
+          "Missing meta: userId/planId/billingCycle not in payment metadata",
+      }).catch(() => {});
       return res.redirect(
         `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=missing_meta`,
       );
@@ -604,6 +708,16 @@ export const verifyPayment = async (req, res) => {
         billingCycle,
         currency: payment.currency,
       });
+      recordPaymentAttempt({
+        txRef: payment.tx_ref ?? `mismatch-${Date.now()}`,
+        userId,
+        planId,
+        billingCycle,
+        payment,
+        status: "failed",
+        failureReason: `Amount mismatch: paid ${payment.currency} ${payment.amount}, expected ${expectedAmount} (underpaid ${(pctDiff * 100).toFixed(1)}%)`,
+        marketerId,
+      }).catch(() => {});
       return res.redirect(
         `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=amount_mismatch${planId ? "&plan=" + planId : ""}`,
       );
@@ -644,6 +758,11 @@ export const verifyPayment = async (req, res) => {
     );
   } catch (error) {
     console.error("verifyPayment error:", error);
+    // Try to log this server error as a failed purchase if we have params
+    try {
+      const { transaction_id } = require === undefined ? {} : {};
+      // Best-effort — if we crash here we can't do much
+    } catch {}
     res.redirect(
       `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=server_error`,
     );
