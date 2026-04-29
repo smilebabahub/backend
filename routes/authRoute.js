@@ -22,6 +22,7 @@ import {
   verifyOTP,
 } from "../controllers/authController.js";
 import { authenticate } from "../middleware/authMiddleWare.js";
+import { googleLogin, facebookLogin } from "../controllers/oauthController.js";
 
 const router = express.Router();
 
@@ -121,6 +122,12 @@ router.get("/guest-country", getGuestCountry);
 // ── Protected ─────────────────────────────────────────────────────────────
 router.get("/me", authenticate, getCurrentUser);
 router.post("/logout", authenticate, logout);
+
+// ── OAuth ─────────────────────────────────────────────────────────────────
+// Token is verified server-side — no redirect needed.
+// Use authLimiter to prevent brute force.
+router.post("/oauth/google", authLimiter, googleLogin);
+router.post("/oauth/facebook", authLimiter, facebookLogin);
 router.patch("/admin/country", authenticate, adminSwitchCountry);
 
 // ── Vendor settings ────────────────────────────────────────────────────────

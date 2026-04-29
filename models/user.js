@@ -191,10 +191,29 @@ const userSchema = new Schema(
     // ── Social ─────────────────────────────────────────────────────────────────
     instagram: { type: String, default: "" },
     facebook: { type: String, default: "" },
-    twitter: { type: String, default: "" }, // X / Twitter handle
+    twitter: { type: String, default: "" },
     tiktok: { type: String, default: "" },
     youtube: { type: String, default: "" },
     whatsapp: { type: String, default: "" },
+
+    // ── OAuth ──────────────────────────────────────────────────────────────
+    authProvider: {
+      type: String,
+      enum: ["local", "google", "facebook", null],
+      default: "local",
+    },
+    oauth: {
+      google: {
+        id: { type: String, default: null },
+        email: { type: String, default: null },
+        picture: { type: String, default: null },
+      },
+      facebook: {
+        id: { type: String, default: null },
+        email: { type: String, default: null },
+        picture: { type: String, default: null },
+      },
+    },
 
     // ── Store policies ─────────────────────────────────────────────────────────
     returnPolicy: { type: String, default: "" },
