@@ -21,8 +21,17 @@ import {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /** Calculate listing expiry date based on vendor's subscription plan */
+// Plan sort priority — higher = shown first in feed
+// Used to pre-compute subscription.planPriority on every ad
+export const PLAN_PRIORITY = {
+  premium: 3, // SuperSmile   — unlimited, 60d
+  popular: 2, // HappySmile   — 10 ads, 30d
+  standard: 1, // BasicSmile   — 5 ads, 30d
+  Basic: 0, // Smile (free) — 1 ad, 3d
+};
+
 function getExpiryDate(planId) {
-  const days = getPlanDurationDays(planId); // Basic=3, standard=30, popular=30, premium=60
+  const days = getPlanDurationDays(planId);
   return new Date(Date.now() + days * 86400000);
 }
 
@@ -38,6 +47,8 @@ function serializeAd(ad) {
           Math.ceil((new Date(obj.expiresAt) - Date.now()) / 86400000),
         )
       : null,
+    planPriority: obj.subscription?.planPriority ?? 0,
+    plan: obj.subscription?.plan ?? "Basic",
     coverImage:
       obj.images?.find((i) => i.isCover)?.url ?? obj.images?.[0]?.url ?? null,
   };
@@ -413,42 +424,115 @@ export const getAds = async (req, res) => {
       if (maxPrice) baseFilter["price.amount"].$lte = Number(maxPrice);
     }
 
-    // ── Public feed: active ads only ────────────────────────────────────────
-    // Expired listings are NEVER shown in the public feed — they are only
-    // visible to the vendor who posted them via GET /ads/my.
-    const feedFilter = {
-      ...baseFilter,
-      $and: [
-        ...andClauses,
-        {
-          $or: [
-            { expiresAt: { $gt: now } },
-            { expiresAt: null },
-            { expiresAt: { $exists: false } },
-          ],
-        },
-      ],
-    };
+    // ── Public feed: active + low-priority expired ads ────────────────────
+    // Expired ads are NOT hidden — they stay in the feed at the bottom with
+    // a visual "expired" badge. This preserves marketplace density and gives
+    // expired vendors indirect motivation to renew (their ad is still seen
+    // but outranked by every paying vendor).
+    //
+    // Exclusions that DO hide an ad from the public feed:
+    //   - isActive: false  (manually deactivated / sold / moderated out)
+    //   - isSold: true
+    //   - isPaused: true
+    // expiresAt past does NOT hide the ad — it only affects sort position.
+    const feedFilter = { ...baseFilter };
 
     // ── Sort ─────────────────────────────────────────────────────────────────
+    // Feed priority (applied for "newest" and "popular" — not price sorts):
+    //
+    //  1. Boosted ads          (boost.isBoosted: true)  — absolute top
+    //  2. Active, not expired  (isNotExpired: 1)
+    //     a. SuperSmile  (planPriority 3)
+    //     b. HappySmile  (planPriority 2)
+    //     c. BasicSmile  (planPriority 1)
+    //     d. Smile/Basic (planPriority 0)
+    //  3. Expired ads          (isNotExpired: 0)         — bottom of feed
+    //
+    // We compute isNotExpired as a virtual sort field using $addFields in
+    // an aggregation pipeline for the default feed. Price/oldest sorts skip
+    // the plan priority to respect explicit user intent.
+    //
+    // For simplicity in the existing find() path, we map planPriority into
+    // the sort. Expired ads naturally sort last because they have been
+    // deprioritised by the expiresAt-based computed field.
+
+    // const now = new Date();
+
+    // For plan-aware sort we use aggregation; for explicit price sorts keep find().
+    const usePlanSort = !sort || sort === "newest" || sort === "popular";
+
     const sortMap = {
-      newest: { "boost.isBoosted": -1, createdAt: -1 },
+      newest: null, // handled by aggregation below
       oldest: { createdAt: 1 },
       price_asc: { "price.amount": 1 },
       price_desc: { "price.amount": -1 },
-      popular: { views: -1 },
+      popular: null, // handled by aggregation below
     };
-    const sortQuery = sortMap[sort] ?? sortMap.newest;
+    const simpleSortQuery = sortMap[sort]; // null means use aggregation
 
-    const [ads, total] = await Promise.all([
-      Ad.find(feedFilter)
-        .sort(sortQuery)
+    let ads;
+    const total = await Ad.countDocuments(feedFilter);
+
+    if (usePlanSort) {
+      // Aggregation pipeline: add isActiveAndFresh virtual field for sort,
+      // then sort by boost → active → plan tier → secondary criterion
+      const secondarySort =
+        sort === "popular" ? { views: -1 } : { createdAt: -1 };
+      ads = await Ad.aggregate([
+        { $match: feedFilter },
+        {
+          $addFields: {
+            // 1 if not expired (or no expiresAt), 0 if expired
+            isActiveAndFresh: {
+              $cond: [
+                {
+                  $or: [
+                    { $gt: ["$expiresAt", now] },
+                    { $eq: ["$expiresAt", null] },
+                    { $not: { $ifNull: ["$expiresAt", false] } },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+        },
+        {
+          $sort: {
+            "boost.isBoosted": -1, // boosted ads always first
+            isActiveAndFresh: -1, // active/fresh before expired
+            "subscription.planPriority": -1, // highest plan first within each group
+            ...secondarySort, // newest or most popular within same plan
+          },
+        },
+        { $skip: skip },
+        { $limit: lim },
+        {
+          $lookup: {
+            from: "users",
+            localField: "postedBy",
+            foreignField: "_id",
+            as: "postedByUser",
+            pipeline: [{ $project: { username: 1, profilePicture: 1 } }],
+          },
+        },
+        {
+          $addFields: {
+            postedBy: { $arrayElemAt: ["$postedByUser", 0] },
+          },
+        },
+        { $unset: "postedByUser" },
+      ]);
+    } else {
+      // Simple find for price/oldest sorts — user intent overrides plan priority
+      ads = await Ad.find(feedFilter)
+        .sort(simpleSortQuery)
         .skip(skip)
         .limit(lim)
         .populate("postedBy", "username profilePicture")
-        .lean(),
-      Ad.countDocuments(feedFilter),
-    ]);
+        .lean();
+    }
 
     const feedPayload = {
       ads: ads.map(serializeAd),

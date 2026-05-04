@@ -77,6 +77,9 @@ const adSubscriptionSchema = new mongoose.Schema(
   {
     plan:      { type: String, enum: ["Basic", "standard", "popular", "premium"] },
     package:   { type: String },   // human-readable plan name e.g. "HappySmile"
+    // Numeric tier 0–3 for fast sort: premium=3, popular=2, standard=1, Basic=0
+    // Stored on the ad so sorting never requires a $lookup on the User collection.
+    planPriority: { type: Number, default: 0 },
     startedAt: { type: Date },
     expiresAt: { type: Date },
     // Listing duration determined by the vendor's subscription plan
@@ -90,7 +93,7 @@ const moderationSchema = new mongoose.Schema(
     status: {
       type:    String,
       enum:    ["pending", "approved", "rejected", "flagged"],
-      default: "pending",
+      default: "approved",
     },
     reviewedBy:  { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
     reviewedAt:  { type: Date,   default: null },
@@ -230,6 +233,7 @@ adSchema.virtual("daysLeft").get(function () {
 // ── Indexes ────────────────────────────────────────────────────────────────
 // Compound indexes for the most common query patterns
 adSchema.index({ "location.country": 1, isActive: 1, expiresAt: 1 });
+adSchema.index({ "location.country": 1, "subscription.planPriority": -1, "boost.isBoosted": -1, createdAt: -1 });
 adSchema.index({ "category.main": 1, "location.country": 1, isActive: 1 });
 adSchema.index({ "category.leaf": 1, isActive: 1 });
 adSchema.index({ "price.amount": 1 });
