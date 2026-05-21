@@ -368,7 +368,10 @@ export const getAds = async (req, res) => {
         limit,
       });
       const cached = await getFeedCache(key);
-      if (cached) return res.status(200).json(cached);
+      if (cached) {
+        res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+        return res.status(200).json(cached);
+      }
     }
     const now = new Date();
     const skip = (Number(page) - 1) * Number(limit);
@@ -378,15 +381,9 @@ export const getAds = async (req, res) => {
     // All conditions collected into $and so multiple $or clauses don't clobber each other.
     const andClauses = [];
 
-    // Country: match exact OR missing/empty (older ads without location.country)
-    andClauses.push({
-      $or: [
-        { "location.country": resolvedCountry },
-        { "location.country": { $exists: false } },
-        { "location.country": "" },
-        { "location.country": null },
-      ],
-    });
+    // STRICT country match — switching country must filter accordingly.
+    // Ads with missing/empty country are excluded from country-filtered feeds.
+    andClauses.push({ "location.country": resolvedCountry });
 
     // Moderation: approved, no moderation field (old records), or pending-but-active.
     // isActive:true is the primary ground truth — trust it even if status says pending.
@@ -455,8 +452,7 @@ export const getAds = async (req, res) => {
     // For simplicity in the existing find() path, we map planPriority into
     // the sort. Expired ads naturally sort last because they have been
     // deprioritised by the expiresAt-based computed field.
-
-    // const now = new Date();
+    // `now` is already declared earlier in getAds() — reuse it.
 
     // For plan-aware sort we use aggregation; for explicit price sorts keep find().
     const usePlanSort = !sort || sort === "newest" || sort === "popular";
@@ -557,6 +553,10 @@ export const getAds = async (req, res) => {
       setFeedCache(key, feedPayload).catch(() => {});
     }
 
+    // Disable browser caching so changing country always re-fetches
+    res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
     res.status(200).json(feedPayload);
   } catch (error) {
     logError("getAds", error);

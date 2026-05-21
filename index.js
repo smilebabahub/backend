@@ -115,6 +115,7 @@ const extraOrigins = (process.env.EXTRA_ORIGINS ?? "")
 const ALLOWED_ORIGINS_EXACT = [
   "http://localhost:3000", // Next.js frontend
   "http://localhost:3001", // backend (self / SSR)
+  "http://localhost:3002", // backend (self / SSR)
   "http://localhost:5173", // Vite dev server (default)
   "http://localhost:5174", // Vite marketer dashboard
   "http://localhost:5175", // Vite fallback port

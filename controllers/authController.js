@@ -724,6 +724,9 @@ export const adminSwitchCountry = async (req, res) => {
   }
 };
 
+
+
+
 // ── PATCH /auth/profile — update user profile ─────────────────────────────
 export const updateProfile = async (req, res) => {
   try {
@@ -825,6 +828,9 @@ export const updateProfile = async (req, res) => {
     res.status(500).json({ message: "Failed to update profile" });
   }
 };
+
+
+
 
 // ── PATCH /auth/password — change password ─────────────────────────────────
 export const changePassword = async (req, res) => {
@@ -935,6 +941,9 @@ export const updateShipping = async (req, res) => {
     res.status(500).json({ message: "Failed to save shipping settings" });
   }
 };
+
+
+
 
 // ── POST /auth/promotion — submit promotional video campaign ───────────────
 export const submitPromotion = async (req, res) => {

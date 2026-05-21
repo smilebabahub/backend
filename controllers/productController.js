@@ -1,6 +1,15 @@
 // controllers/productController.js
 import Ad from "../models/adModel.js";
-import { getFeedCache, setFeedCache, feedCacheKey } from "../lib/redis.js";
+import {
+  getFeedCache,
+  setFeedCache,
+  feedCacheKey,
+  bustFeedCache,
+} from "../lib/redis.js";
+
+// Plan sort priority — used by normaliseProduct fallback when subscription.planPriority
+// is not yet set on a document (older ads from before the field existed).
+const PLAN_SORT = { premium: 3, popular: 2, standard: 1, Basic: 0 };
 
 // ── GET /products — public feed ────────────────────────────────────────────
 export const getProducts = async (req, res) => {
@@ -45,17 +54,9 @@ export const getProducts = async (req, res) => {
     const lim = Number(limit);
 
     // ── Shared filters (country + category) ──────────────────────────────
-    const andClauses = [
-      // Country: exact match OR missing/empty (older records without country field)
-      {
-        $or: [
-          { "location.country": resolvedCountry },
-          { "location.country": { $exists: false } },
-          { "location.country": "" },
-          { "location.country": null },
-        ],
-      },
-    ];
+    // STRICT country match — only ads explicitly tagged with this country show.
+    // Ads with missing country are excluded (admin should backfill those records).
+    const andClauses = [{ "location.country": resolvedCountry }];
 
     const baseFilter = {
       isActive: true,
@@ -76,78 +77,89 @@ export const getProducts = async (req, res) => {
       if (maxPrice) baseFilter["price.amount"].$lte = Number(maxPrice);
     }
 
-    // ── Active filter: not yet expired (high priority) ───────────────────
-    const activeFilter = {
-      ...baseFilter,
-      $and: [
-        ...andClauses,
-        {
-          $or: [
-            { expiresAt: { $gt: now } },
-            { expiresAt: null },
-            { expiresAt: { $exists: false } },
-          ],
-        },
-      ],
-    };
-
-    // ── Expired filter: expired within last 30 days (low priority) ───────
-    const thirtyDaysAgo = new Date(now - 30 * 86400000);
-    const expiredFilter = {
-      ...baseFilter,
-      isActive: { $in: [true, false] },
-      isSold: false,
-      expiresAt: { $lte: now, $gte: thirtyDaysAgo },
-    };
-
-    const sortMap = {
-      newest: { "boost.isBoosted": -1, createdAt: -1 },
+    const usePlanSort = !sort || sort === "newest" || sort === "popular";
+    const simpleSortMap = {
       oldest: { createdAt: 1 },
       price_asc: { "price.amount": 1 },
       price_desc: { "price.amount": -1 },
-      popular: { views: -1 },
     };
-    const sortQuery = sortMap[sort] || sortMap.newest;
 
-    // ── Fetch active products first ───────────────────────────────────────
-    const [activeDocs, activeTotal] = await Promise.all([
-      Ad.find(activeFilter)
-        .sort(sortQuery)
+    // combinedFilter IS baseFilter — it already has country, category,
+    // isActive, isSold, isPaused, and any other applied filters.
+    // Expired ads are included (no expiresAt filter) and sorted last via aggregation.
+    const combinedFilter = baseFilter;
+
+    const total = await Ad.countDocuments(combinedFilter);
+    let docs;
+
+    if (usePlanSort) {
+      // Aggregation: boost → fresh/expired → plan tier → secondary
+      const secondarySort =
+        sort === "popular" ? { views: -1 } : { createdAt: -1 };
+
+      docs = await Ad.aggregate([
+        { $match: combinedFilter },
+        {
+          $addFields: {
+            isActiveAndFresh: {
+              $cond: [
+                {
+                  $or: [
+                    { $gt: ["$expiresAt", now] },
+                    { $eq: ["$expiresAt", null] },
+                    { $not: { $ifNull: ["$expiresAt", false] } },
+                  ],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+        },
+        {
+          $sort: {
+            "boost.isBoosted": -1,
+            isActiveAndFresh: -1,
+            "subscription.planPriority": -1,
+            ...secondarySort,
+          },
+        },
+        { $skip: skip },
+        { $limit: lim },
+        {
+          $lookup: {
+            from: "users",
+            localField: "postedBy",
+            foreignField: "_id",
+            as: "postedByUser",
+            pipeline: [
+              { $project: { username: 1, profilePicture: 1, phone: 1 } },
+            ],
+          },
+        },
+        { $addFields: { postedBy: { $arrayElemAt: ["$postedByUser", 0] } } },
+        { $unset: "postedByUser" },
+      ]);
+    } else {
+      docs = await Ad.find(combinedFilter)
+        .sort(simpleSortMap[sort])
         .skip(skip)
         .limit(lim)
         .populate("postedBy", "username profilePicture phone")
-        .lean(),
-      Ad.countDocuments(activeFilter),
-    ]);
-
-    // ── Pad remaining slots with expired products (low priority) ─────────
-    const remaining = lim - activeDocs.length;
-    let expiredDocs = [];
-    let expiredTotal = 0;
-
-    if (remaining > 0) {
-      const expiredSkip = Math.max(0, skip - activeTotal);
-      [expiredDocs, expiredTotal] = await Promise.all([
-        Ad.find(expiredFilter)
-          .sort({ expiresAt: -1 })
-          .skip(expiredSkip)
-          .limit(remaining)
-          .populate("postedBy", "username profilePicture phone")
-          .lean(),
-        Ad.countDocuments(expiredFilter),
-      ]);
+        .lean();
     }
 
-    const docs = [...activeDocs, ...expiredDocs];
-    const total = activeTotal + expiredTotal;
-
     const products = docs.map(normaliseProduct);
+
+    // Disable browser caching — country switching must always re-fetch
+    res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
+
     const result = {
       products,
       meta: {
         total,
-        activeTotal,
-        expiredTotal,
         page: Number(page),
         limit: lim,
         totalPages: Math.ceil(total / lim),
@@ -156,7 +168,15 @@ export const getProducts = async (req, res) => {
     };
 
     // Write to cache non-blocking — never delay the response
-    if (cKey) setFeedCache(cKey, result).catch(() => {});
+    // Only cache if we actually have results (don't cache empty due to filter issues)
+    if (cKey && docs.length > 0) setFeedCache(cKey, result).catch(() => {});
+    // If result is empty but there was cached data, bust it to force a fresh fetch next time
+    if (cKey && docs.length === 0)
+      getFeedCache(cKey)
+        .then((cached) => {
+          if (cached) bustFeedCache(resolvedCountry).catch(() => {});
+        })
+        .catch(() => {});
 
     res.status(200).json(result);
   } catch (error) {
@@ -243,6 +263,12 @@ function normaliseProduct(doc) {
     images: (doc.images ?? []).map((img) =>
       typeof img === "string" ? img : (img.url ?? ""),
     ),
+    // First image as coverImage — used by all card components for the thumbnail
+    coverImage: (() => {
+      const first = (doc.images ?? [])[0];
+      if (!first) return null;
+      return typeof first === "string" ? first : (first.url ?? null);
+    })(),
     price: doc.price?.amount ?? 0,
     currency: doc.price?.currency ?? "GHS",
     priceDisplay: doc.price?.display ?? null,
@@ -264,6 +290,18 @@ function normaliseProduct(doc) {
     views: doc.views ?? 0,
     isFeatured: doc.isFeatured ?? false,
     isActive: doc.isActive ?? true,
+    expiresAt: doc.expiresAt ?? null,
+    isExpired: doc.expiresAt ? new Date(doc.expiresAt) < new Date() : false,
+    daysLeft: doc.expiresAt
+      ? Math.max(
+          0,
+          Math.ceil((new Date(doc.expiresAt) - Date.now()) / 86400000),
+        )
+      : null,
+    planPriority:
+      doc.subscription?.planPriority ?? PLAN_SORT[doc.subscription?.plan] ?? 0,
+    plan: doc.subscription?.plan ?? "Basic",
+    isBoosted: doc.boost?.isBoosted ?? false,
     createdAt: doc.createdAt,
     updatedAt: doc.updatedAt,
   };
