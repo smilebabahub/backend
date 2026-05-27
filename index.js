@@ -28,6 +28,8 @@ import adminRoutes from "./routes/adminRoutes.js";
 import analyticsRoutes from "./routes/analyticsRoutes.js";
 import marketerRoutes, { updatesRouter } from "./routes/marketerRoute.js";
 import adBoostPaymentRoutes from "./routes/adBoostPaymentRoute.js";
+import newsRoutes from "./routes/newsRoutes.js";
+import promotionRoutes from "./routes/promotionRoutes.js";
 
 import { authenticate as authMiddleware } from "./middleware/authMiddleWare.js";
 import { checkReferralCode } from "./controllers/paymentController.js";
@@ -258,6 +260,8 @@ app.use("/smilebaba/orders", orderRoutes);
 app.use("/smilebaba/bookings", bookingRoutes);
 app.use("/smilebaba/admin", adminRoutes);
 app.use("/smilebaba/analytics", analyticsRoutes); // page view tracking
+app.use("/smilebaba", newsRoutes);
+app.use("/smilebaba", promotionRoutes);
 
 // ── Health check — used by BackendWakeUp component + uptime monitors ─────
 // Returns 200 immediately — just proves the server is awake.
