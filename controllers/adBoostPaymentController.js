@@ -161,7 +161,7 @@ export const initializeBoostPayment = async (req, res) => {
 
     const tx_ref = `smileboost-${countryCode.toLowerCase()}-${userId}-${adId}-${Date.now()}`;
 
-    const redirect_url = `${process.env.NEXT_PUBLIC_APP_URL}/payment-success?type=boost&countryCode=${countryCode}&returnUrl=${encodeURIComponent(returnUrl || `/ads/${adId}`)}`;
+    const redirect_url = `${frontend}/payment-success?type=boost&countryCode=${countryCode}&returnUrl=${encodeURIComponent(returnUrl || `/ads/${adId}`)}`;
 
     const payload = {
       tx_ref,
@@ -184,7 +184,7 @@ export const initializeBoostPayment = async (req, res) => {
       customizations: {
         title: "SmileBaba Ad Boost",
         description: `${BOOST_TIER_NAMES[tier]} — ${ad.title.slice(0, 50)}`,
-        logo: `${process.env.NEXT_PUBLIC_APP_URL}/logo.png`,
+        logo: `${frontend}/logo.png`,
       },
     };
 
@@ -210,10 +210,21 @@ export const initializeBoostPayment = async (req, res) => {
 
 // ── VERIFY BOOST PAYMENT ───────────────────────────────────────────────────
 // GET /payments/boost/verify?transaction_id=&returnUrl=
+// Resolve frontend base URL with proper fallbacks — NEXT_PUBLIC_APP_URL
+// is BUILD-TIME only (Vercel), not set on Render. Use APP_URL or FRONTEND_URL first.
+const FRONTEND = () =>
+  (
+    process.env.APP_URL ??
+    process.env.FRONTEND_URL ??
+    process.env.NEXT_PUBLIC_APP_URL ??
+    "https://smilebabahub.com"
+  ).replace(/\/+$/, "");
+
 export const verifyBoostPayment = async (req, res) => {
   try {
     const { transaction_id, returnUrl } = req.query;
     const countryCode = req.countryCode;
+    const frontend = FRONTEND();
 
     const payment = await verifyGatewayPayment({
       countryCode,
@@ -233,7 +244,7 @@ export const verifyBoostPayment = async (req, res) => {
 
     if (payment.status !== "successful") {
       return res.redirect(
-        `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=not_successful&type=boost`,
+        `${frontend}/payment-failed?reason=not_successful&type=boost`,
       );
     }
 
@@ -243,37 +254,68 @@ export const verifyBoostPayment = async (req, res) => {
     if (!adId || !tier) {
       console.error("[verifyBoostPayment] missing meta:", meta);
       return res.redirect(
-        `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=missing_meta&type=boost`,
+        `${frontend}/payment-failed?reason=missing_meta&type=boost`,
       );
     }
 
     const currency = payment.currency;
     const expectedAmount = BOOST_PRICING[tier]?.prices?.once?.[currency];
 
-    const diff = Math.abs(payment.amount - expectedAmount);
-    if (!expectedAmount || diff > 1) {
+    // Accept overpayments (FLW + MoMo add processing fees on top).
+    // Only reject genuine underpayments > 5%.
+    const diff = payment.amount - expectedAmount;
+    const pctDiff = expectedAmount > 0 ? Math.abs(diff) / expectedAmount : 1;
+    if (!expectedAmount || (diff < 0 && pctDiff > 0.05)) {
       console.error("[verifyBoostPayment] amount mismatch", {
         expected: expectedAmount,
         got: payment.amount,
         diff,
+        pctDiff,
         tier,
       });
       return res.redirect(
-        `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=amount_mismatch&type=boost`,
+        `${frontend}/payment-failed?reason=amount_mismatch&type=boost`,
       );
     }
 
     await activateAdBoost({ adId, tier, txRef: payment.tx_ref, payment });
 
-    const destination = returnUrl
+    // Bust admin overview + feed caches so the boost shows up immediately
+    try {
+      const { safeRedis, bustFeedCache } = await import("../lib/redis.js");
+      await safeRedis(async (c) => {
+        await Promise.all([
+          c.del("admin:overview:all"),
+          c.del("admin:overview:Ghana"),
+          c.del("admin:overview:Nigeria"),
+        ]);
+      });
+      bustFeedCache("Ghana").catch(() => {});
+      bustFeedCache("Nigeria").catch(() => {});
+    } catch {
+      /* non-fatal */
+    }
+
+    // Normalize destination — strip any leading frontend URL so we don't end up with
+    // a doubled domain (https://x.com/https://x.com/...). returnUrl from FLW can be
+    // a full URL or a path.
+    let destination = returnUrl
       ? decodeURIComponent(returnUrl)
       : `/ads/${adId}`;
-    res.redirect(`${process.env.NEXT_PUBLIC_APP_URL}${destination}?boosted=1`);
+    if (destination.startsWith("http")) {
+      try {
+        const u = new URL(destination);
+        destination = u.pathname + u.search;
+      } catch {
+        destination = `/ads/${adId}`;
+      }
+    }
+    if (!destination.startsWith("/")) destination = `/${destination}`;
+
+    return res.redirect(`${frontend}${destination}?boosted=1`);
   } catch (error) {
     console.error("verifyBoostPayment error:", error);
-    res.redirect(
-      `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=server_error&type=boost`,
-    );
+    res.redirect(`${frontend}/payment-failed?reason=server_error&type=boost`);
   }
 };
 
