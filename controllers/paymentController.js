@@ -519,13 +519,19 @@ export const initializePayment = async (req, res) => {
     });
 
     // Redirect Flutterwave back to our OWN verify endpoint — NOT directly to the frontend.
-    // BACKEND_URL must be set on Render (e.g. https://smilebababackend.onrender.com).
-    // NEXT_PUBLIC_API_BASE_URL is a FRONTEND var — do NOT use it here.
-    const backendBase = (process.env.BACKEND_URL ?? "").replace(/\/+$/, "");
+    // Resolves the backend URL with fallbacks so we don't hard-fail when only one env
+    // var is set:
+    //   1. BACKEND_URL              (manually set, preferred)
+    //   2. RENDER_EXTERNAL_URL      (Render auto-injects this for web services)
+    //   3. req protocol + host      (last resort — derived from the incoming request)
+    const backendBase = (
+      process.env.BACKEND_URL ??
+      process.env.RENDER_EXTERNAL_URL ??
+      `${req.protocol}://${req.get("host")}` ??
+      ""
+    ).replace(/\/+$/, "");
     if (!backendBase) {
-      console.error(
-        "[initializePayment] BACKEND_URL env var is not set on Render!",
-      );
+      console.error("[initializePayment] could not resolve backend URL");
       return res.status(500).json({
         message: "Payment system configuration error. Contact support.",
         code: "BACKEND_URL_NOT_SET",

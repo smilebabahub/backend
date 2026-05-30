@@ -177,9 +177,14 @@ export const initializePromoPayment = async (req, res) => {
       .lean();
 
     const tx_ref = `promo-${promo.country.toLowerCase()}-${promo._id}-${Date.now()}`;
-    const backendBase = (process.env.BACKEND_URL ?? "").replace(/\/+$/, "");
+    const backendBase = (
+      process.env.BACKEND_URL ??
+      process.env.RENDER_EXTERNAL_URL ??
+      `${req.protocol}://${req.get("host")}` ??
+      ""
+    ).replace(/\/+$/, "");
     if (!backendBase) {
-      return res.status(500).json({ message: "BACKEND_URL not set" });
+      return res.status(500).json({ message: "Could not resolve backend URL" });
     }
     const verifyPath = `/smilebaba/promote/verify`;
     const redirect_url = `${backendBase}${verifyPath}?promoId=${promo._id}`;

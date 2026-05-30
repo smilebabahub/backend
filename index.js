@@ -159,7 +159,20 @@ app.use(
 // ── Security / logging ────────────────────────────────────────────────────────
 // Single helmet call — crossOriginResourcePolicy: false so Cloudinary
 // images can load cross-origin without being blocked
-app.use(helmet({ crossOriginResourcePolicy: false }));
+// Helmet — disable HSTS and COOP/COEP in dev to avoid 426s on http://localhost.
+// HSTS in particular makes browsers cache "always upgrade to HTTPS" which then
+// breaks http requests for the lifetime of the cache.
+app.use(helmet({
+  crossOriginResourcePolicy:   false,
+  crossOriginOpenerPolicy:     false,
+  crossOriginEmbedderPolicy:   false,
+  // HSTS only in production
+  hsts: process.env.NODE_ENV === "production"
+    ? { maxAge: 31536000, includeSubDomains: true }
+    : false,
+  // Disable Content-Security-Policy in dev — it commonly breaks Next dev HMR
+  contentSecurityPolicy: process.env.NODE_ENV === "production",
+}));
 app.use(morgan("common"));
 app.use("/uploads", express.static("uploads"));
 
@@ -197,13 +210,8 @@ app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 500,
-    // ipKeyGenerator normalises IPv6 addresses so users can't bypass limits
-    // by switching between IPv4 and IPv6 representations of the same address.
-    // We pass it the real visitor IP (from CF-Connecting-IP) not the proxy IP.
     keyGenerator: (req) => {
-      // resolveClientIP returns "" for loopback in dev — fall back to req.ip
       const ip = resolveClientIP(req) || req.ip || "127.0.0.1";
-      // ipKeyGenerator normalises IPv4/IPv6 representations
       try {
         return ipKeyGenerator(ip);
       } catch {
@@ -212,6 +220,11 @@ app.use(
     },
     standardHeaders: true,
     legacyHeaders: false,
+    // CRITICAL: skip rate limiting for CORS preflight (OPTIONS) requests.
+    // Otherwise preflights count against the user's quota and once blocked,
+    // every subsequent request fails because the browser can't get past
+    // preflight. Also skip health checks from uptime monitors.
+    skip: (req) => req.method === "OPTIONS" || req.url === "/smilebaba/health",
   }),
 );
 
@@ -305,11 +318,15 @@ const io = new Server(server, {
 // Without this guard, Socket.IO's "upgrade" event fires on any HTTP upgrade
 // header, returning 426 to the EventSource client.
 server.on("upgrade", (req, socket, head) => {
+  // SSE on /smilebaba/updates uses plain HTTP, not WebSocket. If a client
+  // sends an Upgrade header here, kill the upgrade so Socket.IO doesn't
+  // intercept it and Express can respond normally.
   if (req.url && req.url.startsWith("/smilebaba/updates")) {
-    // SSE doesn't use WebSocket — destroy the upgrade attempt
     socket.destroy();
+    return;
   }
-  // All other upgrades (Socket.IO) are handled by the io engine automatically
+  // Don't intercept HTTPS upgrades — let Node/Express handle those.
+  // Don't destroy upgrades for any other path — Socket.IO handles its own.
 });
 
 registerSocketHandlers(io);
