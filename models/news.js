@@ -88,7 +88,10 @@ newsSchema.index({ status: 1, country: 1, publishedAt: -1 });
 newsSchema.index({ status: 1, category: 1, publishedAt: -1 });
 
 // Auto-generate slug from title if missing
-newsSchema.pre("validate", function (next) {
+// Use async syntax so we don't depend on the `next` callback being injected.
+// Mongoose 7+ supports returning a promise from pre hooks — cleaner and
+// avoids "next is not a function" errors in newer versions.
+newsSchema.pre("validate", async function () {
   if (this.title && !this.slug) {
     this.slug = this.title
       .toLowerCase()
@@ -100,7 +103,6 @@ newsSchema.pre("validate", function (next) {
   if (this.status === "published" && !this.publishedAt) {
     this.publishedAt = new Date();
   }
-  next();
 });
 
 export default mongoose.models.News ?? mongoose.model("News", newsSchema);
