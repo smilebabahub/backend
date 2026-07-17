@@ -30,6 +30,7 @@ import marketerRoutes, { updatesRouter } from "./routes/marketerRoute.js";
 import adBoostPaymentRoutes from "./routes/adBoostPaymentRoute.js";
 import newsRoutes from "./routes/newsRoutes.js";
 import promotionRoutes from "./routes/promotionRoutes.js";
+import adminPromotionRoutes from './routes/admin-promotions.js'
 
 import { authenticate as authMiddleware } from "./middleware/authMiddleWare.js";
 import { checkReferralCode } from "./controllers/paymentController.js";
@@ -41,6 +42,7 @@ import {
   onlineUsers,
   setIO,
 } from "./lib/socketHandler.js";
+
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
 if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
@@ -76,6 +78,7 @@ const REQUIRED_ENV = [
   "FLW_WEBHOOK_SECRET", // OR FLW_WEBHOOK_SECRET_GH / FLW_WEBHOOK_SECRET_NG
 ];
 
+
 const missing = REQUIRED_ENV.filter((k) => {
   // Allow either the base key OR a country-specific variant
   if (k === "FLW_SECRET_KEY") {
@@ -105,6 +108,7 @@ if (missing.length) {
   if (process.env.NODE_ENV === "production") process.exit(1);
 }
 
+
 // ── CORS ──────────────────────────────────────────────────────────────────────
 // Exact origins always allowed
 // Extra origins from env — comma-separated, e.g.:
@@ -122,6 +126,7 @@ const ALLOWED_ORIGINS_EXACT = [
   "http://localhost:5174", // Vite marketer dashboard
   "http://localhost:5175", // Vite fallback port
   "http://localhost:4173", // Vite preview
+  "http://localhost:8081",
   ...extraOrigins,
   "https://smilebabahub.com",
   "https://www.smilebabahub.com",
@@ -142,6 +147,7 @@ function isAllowedOrigin(origin) {
   if (ALLOWED_ORIGIN_PATTERNS.some((re) => re.test(origin))) return true;
   return false;
 }
+
 
 app.use(
   cors({
@@ -274,7 +280,8 @@ app.use("/smilebaba/bookings", bookingRoutes);
 app.use("/smilebaba/admin", adminRoutes);
 app.use("/smilebaba/analytics", analyticsRoutes); // page view tracking
 app.use("/smilebaba", newsRoutes);
-app.use("/smilebaba", promotionRoutes);
+app.use("/smilebaba/promote", promotionRoutes);
+app.use("/smilebaba/admin/promotions", adminPromotionRoutes);
 
 // ── Health check — used by BackendWakeUp component + uptime monitors ─────
 // Returns 200 immediately — just proves the server is awake.
