@@ -43,6 +43,7 @@ async function checkExpiringSubscriptions() {
         daysLeft === 1 ? "Urgent: " : daysLeft === 3 ? "Warning: " : "";
       const dayLabel = daysLeft === 1 ? "tomorrow" : `in ${daysLeft} days`;
 
+      
       await Notification.findOneAndUpdate(
         { dedupeKey },
         {

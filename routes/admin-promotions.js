@@ -1,21 +1,24 @@
 // backend/routes/admin-promotions.js
 //
-// Admin promotion management. Two important fixes over the previous version:
+// ═══════════════════════════════════════════════════════════════════════
+// CANONICAL VERSION — read the header before changing anything
+// ═══════════════════════════════════════════════════════════════════════
 //
-//   1) All status changes now use findByIdAndUpdate($set) with runValidators:false
-//      so LEGACY promotions (missing required fields like userId) don't blow up
-//      when admins try to work with them.
+// AUTH CONTRACT (established by controllers/authController.js):
+//   - Your JWT payload contains `userId` (see generateAccessToken)
+//   - `authenticate` middleware puts that payload on `req.user`
+//   - Therefore the admin's id at request time is → req.user.userId
+//   - NOT req.user._id, NOT req.user.id
 //
-//   2) Emails fire automatically on the three key transitions:
-//        - Payment link sent  → user gets approval email with pay CTA
-//        - Marked live        → user gets "you're live" email
-//        - Rejected           → user gets "sorry, needs rework" email
+// If auth is ever refactored, update the resolveAdminId() helper below.
+// Every other file in the codebase that mutates on behalf of an admin
+// should follow the same pattern.
 
 import express from "express";
-
 import Promotion from "../models/promotion.js";
 import { authenticate } from "../middleware/authMiddleWare.js";
 import { requireAdmin } from "../middleware/requireAdmin.js";
+import { tierFor } from "../config/promoPricing.js";
 import {
   getOverviewStats,
   getStatusCounts,
@@ -29,6 +32,19 @@ import {
 const router = express.Router();
 router.use(authenticate, requireAdmin);
 
+// ─── Single source of truth for resolving the admin's user id ──────
+// Reads `req.user.userId` (your JWT shape). Falls back through common
+// alternatives just in case some route in your codebase uses a
+// different auth middleware. Returns null if none resolve.
+function resolveAdminId(req) {
+  return (
+    req.user?.userId ??
+    req.user?._id ??
+    req.user?.id ??
+    req.auth?.userId ??
+    null
+  );
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // GET /admin/promotions
@@ -74,7 +90,7 @@ router.get("/", async (req, res) => {
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     });
   } catch (err) {
-    console.error("[admin/promotions]", err);
+    console.error("[admin/promotions GET]", err);
     res.status(500).json({ message: err.message });
   }
 });
@@ -82,7 +98,7 @@ router.get("/", async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════
 // GET /admin/promotions/overview
 // ═══════════════════════════════════════════════════════════════════════
-router.get("/overview", async (req, res) => {
+router.get("/overview", async (_req, res) => {
   try {
     res.json(await getOverviewStats());
   } catch (err) {
@@ -91,51 +107,30 @@ router.get("/overview", async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════
-// GET /admin/promotions/:id
-// ═══════════════════════════════════════════════════════════════════════
-router.get("/:id", async (req, res) => {
-  try {
-    const promo = await Promotion.findById(req.params.id)
-      .populate(
-        "userId",
-        "username email phone profilePicture country createdAt",
-      )
-      .populate("reviewedBy", "username")
-      .populate("rejectedBy", "username")
-      .lean();
-    if (!promo) return res.status(404).json({ message: "Not found" });
-    res.json({ promotion: promo });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-
-
-// ═══════════════════════════════════════════════════════════════════════
 // POST /admin/promotions
 //
 // Admin-only manual create. Used to backfill lost/deleted promotions,
 // import legacy campaigns, or set up a promo when the client paid outside
 // the app (bank transfer, direct MoMo, cash).
-//
-// Bypasses the normal review flow — admin sets status directly to
-// whatever they need (usually "live" for reconstruction).
-//
-// Add this handler to routes/admin-promotions.js, right after GET /:id
-// ═════
+// ═══════════════════════════════════════════════════════════════════════
 router.post("/", async (req, res) => {
   try {
+    const adminId = resolveAdminId(req);
+    if (!adminId) {
+      console.error(
+        "[admin/promotions POST] cannot resolve admin id. req.user =",
+        req.user,
+      );
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+
     const {
-      // Advertiser
-      userId, // optional — omit for legacy imports without an account
+      userId, // optional — link to existing user; falls back to adminId
       businessName,
       contactName,
       contactEmail,
       contactPhone,
       preferredContact = "email",
-
-      // Campaign
       title,
       description,
       category,
@@ -143,35 +138,29 @@ router.post("/", async (req, res) => {
       targetRegion,
       targetAudience,
       startDate,
-
-      // Creative
       videoUrl,
       videoName,
       coverImage,
       thumbnailUrl,
       videoDuration,
-
-      // Package
-      tier, // "starter" | "growth" | "enterprise"
-      amount, // optional — resolved from tier if omitted
+      tier,
+      amount,
       currency = "GHS",
       country = "Ghana",
-      days, // optional — resolved from tier if omitted
-      channels, // optional — resolved from tier if omitted
-
-      // Status + workflow
-      status = "live", // admin can set anything: submitted, paid, live...
-      paymentRef, // optional — from Flutterwave
-      flwTxId, // optional — from Flutterwave
-      paidAt, // optional — will default to now if status=paid/live
-      liveAt, // optional — will default to now if status=live
-      expiresAt, // optional — computed from liveAt + days if status=live
+      days,
+      channels,
+      status = "live",
+      paymentRef,
+      flwTxId,
+      paidAt,
+      liveAt,
+      expiresAt,
       views = 0,
       listenerReach = 0,
       engagements = 0,
     } = req.body;
 
-    // ─── Basic validation ────────────────────────────────────────────
+    // ─── Required field validation ────────────────────────────────
     const missing = [];
     if (!businessName) missing.push("businessName");
     if (!contactEmail) missing.push("contactEmail");
@@ -184,24 +173,21 @@ router.post("/", async (req, res) => {
       });
     }
 
-    // ─── Resolve pricing from tier ────────────────────────────────────
-    // (Pull the shared pricing catalogue so amount/days/channels stay
-    //  consistent with what the /promote/pricing endpoint returns.)
-    const { tierFor } = await import("../config/promoPricing.js");
+    // ─── Resolve pricing from tier ────────────────────────────────
     const tierData = tierFor(tier, country);
     if (!tierData) {
       return res.status(400).json({ message: `Unknown tier: ${tier}` });
     }
 
-    // ─── Build the doc ────────────────────────────────────────────────
     const now = new Date();
     const daysResolved = days ?? tierData.days;
     const amountResolved = amount ?? tierData.amount;
     const channelsResolved = channels ?? tierData.channels;
 
+    // ─── Build the document ───────────────────────────────────────
     const doc = {
-      // Owner — either provided, or the admin themselves as fallback
-      userId: userId || req.user._id,
+      // Owner — provided in body OR admin themselves (guaranteed defined)
+      userId: userId || adminId,
 
       businessName,
       contactName,
@@ -254,7 +240,7 @@ router.post("/", async (req, res) => {
         "live",
         "expired",
       ].includes(status)
-        ? req.user._id
+        ? adminId
         : undefined,
       paymentLinkSentAt: [
         "payment_pending",
@@ -286,16 +272,46 @@ router.post("/", async (req, res) => {
       doc.expiresAt = new Date(expiresAt);
     }
 
-    const promotion = await new (
-      await import("../models/promotion.js")
-    ).default(doc).save();
+    // Debug log — if this ever fails again, one look here tells you what's wrong
+    console.log("[admin/promotions POST] creating:", {
+      adminId,
+      userId: doc.userId,
+      businessName: doc.businessName,
+      title: doc.title,
+      status: doc.status,
+      tier: doc.tier,
+      videoUrl: doc.videoUrl ? "✓" : "✗ MISSING",
+      coverImage: doc.coverImage ? "✓" : "(none — will auto-derive from video)",
+    });
+
+    const promotion = await new Promotion(doc).save();
 
     console.log(
-      `[admin/promotions POST] created ${promotion._id} status=${status} by admin=${req.user._id}`,
+      `[admin/promotions POST] created ${promotion._id} status=${status} by admin=${adminId}`,
     );
     res.status(201).json({ promotion });
   } catch (err) {
     console.error("[admin/promotions POST]", err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// GET /admin/promotions/:id
+// ═══════════════════════════════════════════════════════════════════════
+router.get("/:id", async (req, res) => {
+  try {
+    const promo = await Promotion.findById(req.params.id)
+      .populate(
+        "userId",
+        "username email phone profilePicture country createdAt",
+      )
+      .populate("reviewedBy", "username")
+      .populate("rejectedBy", "username")
+      .lean();
+    if (!promo) return res.status(404).json({ message: "Not found" });
+    res.json({ promotion: promo });
+  } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
@@ -306,6 +322,15 @@ router.post("/", async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════
 router.patch("/:id", async (req, res) => {
   try {
+    const adminId = resolveAdminId(req);
+    if (!adminId) {
+      console.error(
+        "[admin/promotions PATCH] cannot resolve admin id. req.user =",
+        req.user,
+      );
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+
     const { action, notes, reason, metrics } = req.body;
 
     const allowed = [
@@ -321,19 +346,14 @@ router.patch("/:id", async (req, res) => {
       return res.status(400).json({ message: "Invalid action" });
     }
 
-    // Load raw promotion (lean-ish, we don't need the doc for save())
     const promo = await Promotion.findById(req.params.id);
     if (!promo) return res.status(404).json({ message: "Promotion not found" });
 
-    // ─── Build the $set patch instead of mutating + saving ──────────
-    // (This avoids re-validating the full doc, so legacy records
-    //  missing required fields don't cause validation errors.)
     const now = new Date();
     const set = {};
     let emailToSend = null;
 
     switch (action) {
-      // ── Start review ────────────────────────────────────────────
       case "start_review":
         if (promo.status !== "submitted") {
           return res
@@ -342,11 +362,10 @@ router.patch("/:id", async (req, res) => {
         }
         set.status = "under_review";
         set.reviewedAt = now;
-        set.reviewedBy = req.user._id;
+        set.reviewedBy = adminId;
         if (notes) set.reviewNotes = notes;
         break;
 
-      // ── Send payment link (admin approves the video) ────────────
       case "send_payment_link":
         if (!["submitted", "under_review"].includes(promo.status)) {
           return res
@@ -357,49 +376,46 @@ router.patch("/:id", async (req, res) => {
         }
         set.status = "payment_pending";
         set.paymentLinkSentAt = now;
-        set.reviewedBy = promo.reviewedBy || req.user._id;
+        set.reviewedBy = promo.reviewedBy || adminId;
         set.reviewedAt = promo.reviewedAt || now;
         if (notes) set.reviewNotes = notes;
         emailToSend = { kind: "approved", notes };
         break;
 
-      // ── Mark live (after payment received) ──────────────────────
       case "mark_live":
-        if (promo.status !== "paid") {
-          return res
-            .status(409)
-            .json({ message: `Must be "paid", is "${promo.status}"` });
+        // Allow from paid (normal flow) OR payment_pending (offline payment)
+        if (!["paid", "payment_pending"].includes(promo.status)) {
+          return res.status(409).json({
+            message: `Must be "paid" or "payment_pending", is "${promo.status}"`,
+          });
         }
         set.status = "live";
         set.liveAt = now;
+        set.paidAt = promo.paidAt || now;
         set.expiresAt = new Date(Date.now() + (promo.days || 7) * 86400 * 1000);
         emailToSend = { kind: "live" };
         break;
 
-      // ── Expire ──────────────────────────────────────────────────
       case "expire":
         set.status = "expired";
         set.expiresAt = now;
         break;
 
-      // ── Reject ──────────────────────────────────────────────────
       case "reject":
         set.status = "rejected";
         set.rejectedAt = now;
-        set.rejectedBy = req.user._id;
+        set.rejectedBy = adminId;
         set.rejectionReason = reason || "";
         emailToSend = { kind: "rejected", reason };
         break;
 
-      // ── Refund ──────────────────────────────────────────────────
       case "refund":
         set.status = "refunded";
         set.refundedAt = now;
-        set.refundedBy = req.user._id;
+        set.refundedBy = adminId;
         set.refundReason = reason || "";
         break;
 
-      // ── Update metrics ──────────────────────────────────────────
       case "update_metrics":
         if (metrics?.views !== undefined) set.views = metrics.views;
         if (metrics?.listenerReach !== undefined)
@@ -409,14 +425,14 @@ router.patch("/:id", async (req, res) => {
         break;
     }
 
-    // ─── Apply the update surgically. Skip full-doc validation. ──────
+    // Surgical update — bypasses full-doc validation so legacy records don't blow up
     const updated = await Promotion.findByIdAndUpdate(
       req.params.id,
       { $set: set },
       { new: true, runValidators: false },
     );
 
-    // ─── Fire the email (async, non-blocking — failures logged) ──────
+    // ─── Fire email (async, non-blocking, never fails the request) ───
     if (emailToSend) {
       const to = updated.contactEmail;
       if (!to) {
@@ -441,7 +457,6 @@ router.patch("/:id", async (req, res) => {
             });
           }
         } catch (e) {
-          // Never fail the admin action just because email hiccuped
           console.error(
             `[admin/promotions] email failed (${emailToSend.kind}):`,
             e.message,

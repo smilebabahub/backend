@@ -116,27 +116,26 @@ const promotionSchema = new mongoose.Schema(
 );
 
 // ─── Pre-save: auto-fill businessName + auto-derive thumbnail ─────────
-promotionSchema.pre("save", function (next) {
+// ─── Pre-save: auto-fill businessName + auto-derive thumbnail ─────────
+// Async style — no `next` parameter needed. Mongoose awaits the returned
+// promise. This is the modern recommended pattern and avoids all the
+// "next is not a function" quirks entirely.
+promotionSchema.pre("save", async function () {
   if (!this.businessName && this.contactName) {
     this.businessName = this.contactName;
   }
 
-  // If no thumbnail was provided but we have a Cloudinary video URL,
-  // derive one via Cloudinary's video-to-image transformation.
-  if (
-    !this.thumbnailUrl &&
-    this.videoUrl &&
-    this.videoUrl.includes("/video/upload/")
-  ) {
+  // Auto-derive thumbnail from Cloudinary video URL
+  if (!this.thumbnailUrl && this.videoUrl && this.videoUrl.includes("/video/upload/")) {
     this.thumbnailUrl = this.videoUrl
       .replace("/video/upload/", "/video/upload/w_640,h_360,c_fill,so_1/")
       .replace(/\.[^.]+$/, ".jpg");
   }
 
+  // Auto-expire live campaigns past their end date
   if (this.status === "live" && this.expiresAt && this.expiresAt < new Date()) {
     this.status = "expired";
   }
-  next();
 });
 
 // ─── Virtual: displayImage — the ONE image to show on cards ───────────
