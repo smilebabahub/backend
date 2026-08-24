@@ -52,13 +52,25 @@ const app = express();
 const server = http.createServer(app);
 
 // ── Flutterwave webhooks need raw body BEFORE express.json() ─────────────────
+// server.js — PATCH (find the WEBHOOK_PATHS block and REPLACE with this)
+//
+// Add the order webhook paths to the raw-body list so Flutterwave's
+// signature verification can hash the exact bytes it sent.
+
 const WEBHOOK_PATHS = [
+  // Existing subscription webhooks
   "/smilebaba/payments/gh/webhook",
   "/smilebaba/payments/ng/webhook",
   "/smilebaba/payments/intl/webhook",
   "/smilebaba/payments/boost/gh/webhook",
   "/smilebaba/payments/boost/ng/webhook",
   "/smilebaba/payments/boost/intl/webhook",
+
+  // NEW: order webhooks
+  "/smilebaba/orders/webhook",
+  "/smilebaba/orders/gh/webhook",
+  "/smilebaba/orders/ng/webhook",
+  "/smilebaba/orders/intl/webhook",
 ];
 WEBHOOK_PATHS.forEach((path) =>
   app.use(path, express.raw({ type: "application/json" })),
