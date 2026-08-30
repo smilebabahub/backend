@@ -327,6 +327,10 @@ export const getAds = async (req, res) => {
       country,
       category,
       sub,
+      userId, //  — mobile calls this
+      postedBy, //  — accept either name (postedBy is our canonical field)
+      vendorTier, //  — "high" = SuperSmile + HappySmile
+
       leaf,
       minPrice,
       maxPrice,
@@ -357,6 +361,9 @@ export const getAds = async (req, res) => {
       !negotiable &&
       !currency &&
       !sub &&
+      !userId && 
+      !postedBy && 
+      !vendorTier &&
       !leaf;
 
     if (isSimpleFeed) {
@@ -420,6 +427,13 @@ export const getAds = async (req, res) => {
       if (minPrice) baseFilter["price.amount"].$gte = Number(minPrice);
       if (maxPrice) baseFilter["price.amount"].$lte = Number(maxPrice);
     }
+    // Vendor-scoped feed (storefront / "more from this seller")
+    if (userId || postedBy) baseFilter.postedBy = userId ?? postedBy;
+
+    // Premium-vendor-only feed (planPriority: 2 = HappySmile, 3 = SuperSmile)
+    if (vendorTier === "high") {
+      baseFilter["subscription.planPriority"] = { $gte: 2 };
+    }
 
     // ── Public feed: active + low-priority expired ads ────────────────────
     // Expired ads are NOT hidden — they stay in the feed at the bottom with
@@ -455,7 +469,8 @@ export const getAds = async (req, res) => {
     // `now` is already declared earlier in getAds() — reuse it.
 
     // For plan-aware sort we use aggregation; for explicit price sorts keep find().
-    const usePlanSort = !sort || sort === "newest" || sort === "popular";
+    const usePlanSort =
+      !sort || sort === "newest" || sort === "popular" || sort === "premium";
 
     const sortMap = {
       newest: null, // handled by aggregation below

@@ -43,6 +43,7 @@ function computeMoney(subtotal, rate = COMMISSION_RATE) {
   return { subtotal: s, commissionAmount: commission, vendorPayout: payout };
 }
 
+
 /** Category → payment model + escrow trigger + refund policy defaults. */
 function policyForCategory(catMain, vendorHasSubaccount) {
   const cat = String(catMain || "marketplace").toLowerCase();
@@ -377,13 +378,14 @@ export const createOrder = async (req, res) => {
 
     // ── Currency: vendor's country decides ─────────────────────────────
     const currency =
-      vendor.currency ?? (vendor.country === "Nigeria" ? "NGN" : "GHS");
+      primaryAd.price?.currency ??
+      (primaryAd.location?.country === "Nigeria" ? "NGN" : "GHS");
 
     // ── Build items array from server-side data ────────────────────────
     const items = [];
     for (const line of orderLines) {
       const ad = ads.find((a) => String(a._id) === String(line.adId));
-      const price = money(ad.price);
+      const price = money(ad.price?.amount ?? ad.price);
       if (price <= 0) {
         return res.status(400).json({
           message: `"${ad.title}" has no valid price. Contact the vendor.`,
