@@ -86,6 +86,13 @@ const orderSchema = new mongoose.Schema(
     },
     orderGroup: { type: String, index: true },
     deliveryFee: { type: Number, default: 0 },
+    timeline: [{
+      status: { type: String, required: true },
+      label:  String,
+      note:   String,
+      actor:  { type: String, enum: ["buyer", "vendor", "system", "admin"] },
+      at:     { type: Date, default: Date.now },
+    }],
 
     // Flutterwave references
     flwTxRef: String, // Your reference (order._id or generated)

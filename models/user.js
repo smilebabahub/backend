@@ -214,6 +214,15 @@ const userSchema = new Schema(
         picture: { type: String, default: null },
       },
     },
+    pushTokens: [
+      {
+        token: { type: String, required: true },
+        platform: { type: String, enum: ["ios", "android"] },
+        deviceId: String,
+        lastUsedAt: { type: Date, default: Date.now },
+      },
+    ],
+    pushEnabled: { type: Boolean, default: true },
 
     // ── Store policies ─────────────────────────────────────────────────────────
     returnPolicy: { type: String, default: "" },

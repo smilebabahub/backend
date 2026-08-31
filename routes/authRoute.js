@@ -23,6 +23,7 @@ import {
 } from "../controllers/authController.js";
 import { authenticate } from "../middleware/authMiddleWare.js";
 import { googleLogin, facebookLogin } from "../controllers/oauthController.js";
+import { registerPushToken, removePushToken, setPushEnabled } from "../controllers/pushController.js";
 
 const router = express.Router();
 
@@ -137,5 +138,8 @@ router.patch("/notifications", authenticate, updateNotifications);
 router.patch("/payment-details", authenticate, updatePaymentDetails);
 router.patch("/shipping", authenticate, updateShipping);
 router.post("/promotion", authenticate, submitPromotion);
+router.post("/push-token",     authenticate, registerPushToken);
+router.delete("/push-token",   authenticate, removePushToken);
+router.patch("/push-settings", authenticate, setPushEnabled);
 
 export default router;

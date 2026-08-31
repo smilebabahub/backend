@@ -4,7 +4,7 @@
 //
 //   getMyOrders          — buyer's orders
 //   getVendorOrders      — vendor's received orders (their items only)
-//   getSingleOrder       — one populated order
+//   getSingleOrder       — one populated order, with journey
 //   getOrderGroup        — every order in a multi-vendor checkout
 //   createOrder          — splits a cart into one order per vendor
 //   initOrderPayment     — one Flutterwave charge for a whole group
@@ -15,15 +15,25 @@
 //   requestRefund        — buyer requests, vendor resolves from dashboard
 //   reportDispute        — freezes payout, admin intervenes
 //
-// MULTI-VENDOR MODEL
+// MULTI-VENDOR
 //   A cart spanning three vendors becomes three Order documents sharing one
-//   `orderGroup`. Each vendor sees and fulfils only their own items. The buyer
-//   pays once — the group total — and escrow releases per vendor, so
-//   confirming delivery from one doesn't pay out another.
+//   `orderGroup`. Each vendor sees and fulfils only their own items. The
+//   buyer pays once, and escrow releases per vendor.
 //
-// Requires on models/order.js:
+// TIMELINE
+//   Every status change appends to order.timeline. Append-only, so a
+//   cancelled order still shows it was confirmed and dispatched first.
+//
+// Requires on models/orderModel.js:
 //   orderGroup:  { type: String, index: true },
 //   deliveryFee: { type: Number, default: 0 },
+//   timeline: [{
+//     status: { type: String, required: true },
+//     label:  String,
+//     note:   String,
+//     actor:  { type: String, enum: ["buyer", "vendor", "system", "admin"] },
+//     at:     { type: Date, default: Date.now },
+//   }],
 
 import crypto from "crypto";
 
@@ -31,14 +41,18 @@ import Order from "../models/orderModel.js";
 import Ad from "../models/adModel.js";
 import User from "../models/user.js";
 import VendorLedger from "../models/vendorLedger.js";
-import Notification from "../models/notificationModel.js";
 import { sendSMS } from "../lib/smsService.js";
 import {
   initializeGatewayPayment,
   verifyGatewayPayment,
   verifyWebhookSignature,
 } from "../lib/paymentGateway.js";
-import { pushToUser } from "../lib/socketHandler.js";
+import { notify } from "../lib/notify.js";
+import {
+  addTimelineEntry,
+  buildJourney,
+  statusSummary,
+} from "../lib/orderTimeline.js";
 
 const COMMISSION_RATE = 0.05;
 
@@ -167,6 +181,7 @@ export const getMyOrders = async (req, res) => {
         currency: o.currency ?? "GHS",
         symbol: sym(o.currency ?? "GHS"),
         status: o.status ?? "pending",
+        statusLabel: statusSummary(o),
         paymentModel: o.paymentModel,
         escrowStatus: o.escrowStatus,
         refundEligible: isRefundEligible(o.refundPolicy, o.status ?? "pending"),
@@ -229,11 +244,11 @@ export const getVendorOrders = async (req, res) => {
         currency: o.currency ?? "GHS",
         symbol: sym(o.currency ?? "GHS"),
         status: o.status ?? "pending",
+        statusLabel: statusSummary(o),
         buyer: o.buyer?.username ?? "Customer",
-        // Buyer phone only once they've actually paid — no lead scraping
-        buyerPhone: ["pending"].includes(o.status)
-          ? ""
-          : (o.buyer?.phone ?? ""),
+        // Buyer's phone unlocks only once they've paid — an unpaid order
+        // is not a free lead.
+        buyerPhone: o.status === "pending" ? "" : (o.buyer?.phone ?? ""),
         adTitle: o.ad?.title ?? "",
         image: o.ad?.coverImage ?? o.ad?.images?.[0]?.url ?? null,
         deliveryAddress: parseAddress(o.deliveryAddress),
@@ -241,6 +256,7 @@ export const getVendorOrders = async (req, res) => {
         escrowStatus: o.escrowStatus,
         refundRequestedAt: o.refundRequestedAt ?? null,
         refundReason: o.refundReason ?? null,
+        timeline: o.timeline ?? [],
         createdAt: o.createdAt,
       })),
       meta: { total, page: Number(page), limit: Number(limit) },
@@ -338,6 +354,9 @@ export const getSingleOrder = async (req, res) => {
         currency: order.currency ?? "GHS",
         symbol: sym(order.currency ?? "GHS"),
         status: order.status ?? "pending",
+        statusLabel: statusSummary(order),
+        timeline: order.timeline ?? [],
+        journey: buildJourney(order),
         paymentModel: order.paymentModel,
         escrowStatus: order.escrowStatus,
         refundEligible: isRefundEligible(
@@ -543,6 +562,18 @@ export const createOrder = async (req, res) => {
         refundPolicy,
         refundEligible: refundPolicy.type !== "none",
         flwSubaccountId: vendor.flwSubaccountId ?? null,
+
+        timeline: [
+          {
+            status: "placed",
+            label: "Order placed",
+            note: isCash
+              ? "Pay the vendor on delivery."
+              : "Waiting for payment to be confirmed.",
+            actor: "buyer",
+            at: new Date(),
+          },
+        ],
       });
     }
 
@@ -886,7 +917,7 @@ export const orderPaymentWebhook = async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════
 export const updateOrderStatus = async (req, res) => {
   try {
-    const { status } = req.body;
+    const { status, note } = req.body;
     const valid = ["confirmed", "dispatched", "delivered", "cancelled"];
     if (!valid.includes(status)) {
       return res.status(400).json({ message: "Invalid status" });
@@ -909,6 +940,8 @@ export const updateOrderStatus = async (req, res) => {
     }
 
     order.status = status;
+    addTimelineEntry(order, status, { actor: "vendor", note });
+
     if (status === "dispatched") order.shippedAt = new Date();
     if (status === "delivered") order.deliveredAt = new Date();
 
@@ -923,24 +956,55 @@ export const updateOrderStatus = async (req, res) => {
     await order.save();
     res.status(200).json({ message: "Order status updated", order });
 
+    // ── Tell the buyer ───────────────────────────────────────────────
     const [buyer, orderAd] = await Promise.all([
       User.findById(order.buyer).select("phone").lean(),
       Ad.findById(order.ad).select("category.main").lean(),
     ]);
 
+    const isDelivery = orderAd?.category?.main === "delivery";
+    const num = String(order._id).slice(-6).toUpperCase();
+
+    const copy = {
+      confirmed: {
+        title: "Order confirmed",
+        body: isDelivery
+          ? "Your rider confirmed and will collect your item soon."
+          : "The vendor is preparing your order.",
+        sms: isDelivery
+          ? `SmileBaba: Your rider has confirmed! They will collect your item soon.`
+          : `SmileBaba: Your order ${num} has been confirmed. The vendor will deliver soon.`,
+      },
+      dispatched: {
+        title: "On the way",
+        body: "Your order has been sent out for delivery.",
+        sms: `SmileBaba: Order ${num} is on the way! Track it in the app.`,
+      },
+      delivered: {
+        title: "Delivered",
+        body: "Confirm you've received it to release payment to the vendor.",
+        sms: `SmileBaba: Order ${num} delivered. Confirm in the app to release payment.`,
+      },
+      cancelled: {
+        title: "Order cancelled",
+        body: note ?? "Contact support if this is unexpected.",
+        sms: `SmileBaba: Order ${num} was cancelled. Contact support if unexpected.`,
+      },
+    }[status];
+
+    notify({
+      userId: order.buyer,
+      type: "boost_approved", // reuse until an order type exists on the enum
+      title: copy.title,
+      message: copy.body,
+      actionUrl: `/orders/${order._id}`,
+      actionLabel: "Track order",
+      dedupeKey: `order-${order._id}-${status}`,
+      data: { orderId: String(order._id), status },
+    }).catch(() => {});
+
     if (buyer?.phone) {
-      const isDelivery = orderAd?.category?.main === "delivery";
-      const msgs = {
-        confirmed: isDelivery
-          ? `SmileBaba: Your rider has confirmed! They will collect your item soon. 🛵`
-          : `SmileBaba: Your order has been confirmed! The vendor will deliver soon.`,
-        dispatched: `SmileBaba: Your order is on the way! 🛵 Track progress in the app.`,
-        delivered: isDelivery
-          ? `SmileBaba: Delivery complete! Your item has arrived. 📦`
-          : `SmileBaba: Your order has been delivered. Confirm in the app to release payment.`,
-        cancelled: `SmileBaba: Your order was cancelled. Contact support if this is unexpected.`,
-      };
-      sendSMS(buyer.phone, msgs[status]).catch((e) =>
+      sendSMS(buyer.phone, copy.sms).catch((e) =>
         console.error("[SMS]", e.message),
       );
     }
@@ -979,6 +1043,7 @@ export const confirmDelivery = async (req, res) => {
     order.deliveredAt = order.deliveredAt ?? new Date();
     order.deliveryConfirmedAt = new Date();
     order.deliveryConfirmedBy = "buyer";
+    addTimelineEntry(order, "completed", { actor: "buyer" });
 
     if (order.escrowStatus === "held") {
       await releaseEscrow({ order, actor: "buyer" });
@@ -991,16 +1056,16 @@ export const confirmDelivery = async (req, res) => {
       order: sanitiseOrder(order),
     });
 
-    Notification.create({
-      user: order.vendor,
-      type: "boost_approved", // reuse existing enum until a money type exists
+    notify({
+      userId: order.vendor,
+      type: "boost_approved",
       title: "Payment released",
       message: `Buyer confirmed delivery. ${sym(order.currency)}${order.vendorPayout.toLocaleString()} added to your balance.`,
       actionUrl: "/vendor/dashboard",
       actionLabel: "View earnings",
+      dedupeKey: `order-${order._id}-released`,
+      data: { orderId: String(order._id) },
     }).catch(() => {});
-
-    pushToUser(String(order.vendor), "new_notification", {});
   } catch (err) {
     console.error("[confirmDelivery]", err);
     res.status(500).json({ message: "Failed to confirm delivery" });
@@ -1050,6 +1115,10 @@ export const requestRefund = async (req, res) => {
     order.refundRequestedAt = new Date();
     order.refundReason = reason;
     order.refundNotes = notes ?? "";
+    addTimelineEntry(order, "refund_requested", {
+      actor: "buyer",
+      note: reason,
+    });
     await order.save();
 
     res.status(200).json({
@@ -1057,15 +1126,16 @@ export const requestRefund = async (req, res) => {
       order: sanitiseOrder(order),
     });
 
-    Notification.create({
-      user: order.vendor,
+    notify({
+      userId: order.vendor,
       type: "boost_approved",
       title: "Refund requested",
-      message: `A buyer has requested a refund. Reason: ${reason}. Review from your dashboard.`,
+      message: `A buyer requested a refund. Reason: ${reason}. Review it from your dashboard.`,
       actionUrl: "/vendor/orders",
       actionLabel: "Review refund",
+      dedupeKey: `order-${order._id}-refund-requested`,
+      data: { orderId: String(order._id) },
     }).catch(() => {});
-    pushToUser(String(order.vendor), "new_notification", {});
   } catch (err) {
     console.error("[requestRefund]", err);
     res.status(500).json({ message: "Failed to request refund" });
@@ -1091,6 +1161,7 @@ export const reportDispute = async (req, res) => {
     order.refundReason = reason;
     order.refundNotes = notes ?? "";
     order.refundRequestedAt = new Date();
+    addTimelineEntry(order, "disputed", { actor: "buyer", note: reason });
     await order.save();
 
     // Freeze the money too — a pending ledger row must not become available
@@ -1130,6 +1201,7 @@ async function markOrderPaid({ order, payment }) {
   order.status = "confirmed";
   order.paidAt = new Date();
   order.flwTxId = String(payment.id ?? "");
+  addTimelineEntry(order, "paid", { actor: "system" });
 
   if (order.paymentModel === "split_at_source") {
     // Flutterwave already sent the vendor's share at charge time
@@ -1159,27 +1231,29 @@ async function markOrderPaid({ order, payment }) {
 
   await order.save();
 
-  Promise.all([
-    Notification.create({
-      user: order.buyer,
-      type: "boost_approved",
-      title: "Payment received",
-      message: "Your order is confirmed and the vendor has been notified.",
-      actionUrl: `/orders/${order._id}`,
-      actionLabel: "View order",
-    }),
-    Notification.create({
-      user: order.vendor,
-      type: "boost_approved",
-      title: "New paid order",
-      message: `${sym(order.currency)}${order.total.toLocaleString()} paid. Start preparing.`,
-      actionUrl: "/vendor/orders",
-      actionLabel: "View orders",
-    }),
-  ]).catch(() => {});
+  const num = String(order._id).slice(-6).toUpperCase();
 
-  pushToUser(String(order.buyer), "new_notification", {});
-  pushToUser(String(order.vendor), "new_notification", {});
+  notify({
+    userId: order.buyer,
+    type: "boost_approved",
+    title: "Payment confirmed",
+    message: "Your order is confirmed and the vendor has been notified.",
+    actionUrl: `/orders/${order._id}`,
+    actionLabel: "Track order",
+    dedupeKey: `order-${order._id}-paid`,
+    data: { orderId: String(order._id), status: "paid" },
+  }).catch(() => {});
+
+  notify({
+    userId: order.vendor,
+    type: "boost_approved",
+    title: "New paid order",
+    message: `${sym(order.currency)}${order.total.toLocaleString()} paid for order ${num}. Start preparing.`,
+    actionUrl: "/vendor/orders",
+    actionLabel: "View orders",
+    dedupeKey: `order-${order._id}-vendor-paid`,
+    data: { orderId: String(order._id) },
+  }).catch(() => {});
 }
 
 /** Flip this order's held escrow to available in the vendor ledger. */
@@ -1224,16 +1298,16 @@ async function notifyVendorOfNewOrder({ order, ad, vendor, currency }) {
     sendSMS(vendorFull.phone, smsBody).catch(() => {});
   }
 
-  Notification.create({
-    user: vendor._id,
+  await notify({
+    userId: vendor._id,
     type: "boost_approved",
     title: "New order",
     message: `${sym(currency)}${order.total.toLocaleString()} — awaiting payment confirmation.`,
     actionUrl: "/vendor/orders",
     actionLabel: "View order",
-  }).catch(() => {});
-
-  pushToUser(String(vendor._id), "new_notification", {});
+    dedupeKey: `order-${order._id}-placed`,
+    data: { orderId: String(order._id) },
+  });
 }
 
 function parseAddress(a) {
@@ -1260,6 +1334,9 @@ function sanitiseOrder(o) {
     currency: raw.currency ?? "GHS",
     symbol: sym(raw.currency ?? "GHS"),
     status: raw.status ?? "pending",
+    statusLabel: statusSummary(raw),
+    timeline: raw.timeline ?? [],
+    journey: buildJourney(raw),
     paymentModel: raw.paymentModel,
     escrowStatus: raw.escrowStatus,
     refundEligible: isRefundEligible(raw.refundPolicy, raw.status ?? "pending"),

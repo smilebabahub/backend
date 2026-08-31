@@ -35,6 +35,18 @@ function getExpiryDate(planId) {
   return new Date(Date.now() + days * 86400000);
 }
 
+/**
+ * Vendor fields the ad detail page needs.
+ *
+ * The contact gate on mobile decides whether to show a phone number based
+ * on the vendor's live subscription, so the detail endpoints have to
+ * populate it. The feed deliberately does not — it only needs a name and
+ * an avatar, and joining subscription data on every card is wasted work.
+ */
+const VENDOR_DETAIL_FIELDS =
+  "username profilePicture phone whatsapp storeName storeSlug storePhone " +
+  "isSubscribed subscription.plan subscription.expiresAt";
+
 /** Build the standard ad response shape — strip internal fields */
 function serializeAd(ad) {
   const obj = ad.toObject ? ad.toObject() : ad;
@@ -319,17 +331,32 @@ export const createAd = async (req, res) => {
 
 // ── GET ALL ADS (public feed) ──────────────────────────────────────────────
 // GET /ads
-// Query params: country, category, sub, leaf, minPrice, maxPrice,
-//               condition, city, region, search, sort, page, limit
+//
+// Query params:
+//   country, category, sub, leaf, minPrice, maxPrice, currency, condition,
+//   city, region, search, negotiable, sort, page, limit,
+//   userId / postedBy   — vendor-scoped feed (storefront, "more from seller")
+//   vendorTier=high     — only HappySmile + SuperSmile vendors
+//
+// `category` accepts a comma-separated list, so one request can span a
+// vertical that maps to several real categories:
+//     ?category=phones,fashion,home-office
+//
+// Sorts:
+//   newest    — boost → fresh → plan tier → newest      (default)
+//   popular   — boost → fresh → plan tier → most viewed
+//   premium   — same as newest; plan tier already leads
+//   trending  — demand score (see TREND_WEIGHTS below)
+//   oldest / price_asc / price_desc — literal, no plan weighting
 export const getAds = async (req, res) => {
   try {
     const {
       country,
       category,
       sub,
-      userId, //  — mobile calls this
-      postedBy, //  — accept either name (postedBy is our canonical field)
-      vendorTier, //  — "high" = SuperSmile + HappySmile
+      userId, // mobile calls this
+      postedBy, // accept either name (postedBy is our canonical field)
+      vendorTier, // "high" = SuperSmile + HappySmile
 
       leaf,
       minPrice,
@@ -361,8 +388,8 @@ export const getAds = async (req, res) => {
       !negotiable &&
       !currency &&
       !sub &&
-      !userId && 
-      !postedBy && 
+      !userId &&
+      !postedBy &&
       !vendorTier &&
       !leaf;
 
@@ -415,7 +442,18 @@ export const getAds = async (req, res) => {
     if (region)
       baseFilter["location.region"] = { $regex: region, $options: "i" };
     if (city) baseFilter["location.city"] = { $regex: city, $options: "i" };
-    if (category) baseFilter["category.main"] = category;
+
+    // Category accepts one value or a comma-separated list. A single value
+    // behaves exactly as before, so nothing existing changes.
+    if (category) {
+      const cats = String(category)
+        .split(",")
+        .map((c) => c.trim())
+        .filter(Boolean);
+      if (cats.length > 1) baseFilter["category.main"] = { $in: cats };
+      else if (cats.length === 1) baseFilter["category.main"] = cats[0];
+    }
+
     if (sub) baseFilter["category.sub"] = sub;
     if (leaf) baseFilter["category.leaf"] = leaf;
     if (condition) baseFilter.condition = condition;
@@ -427,6 +465,7 @@ export const getAds = async (req, res) => {
       if (minPrice) baseFilter["price.amount"].$gte = Number(minPrice);
       if (maxPrice) baseFilter["price.amount"].$lte = Number(maxPrice);
     }
+
     // Vendor-scoped feed (storefront / "more from this seller")
     if (userId || postedBy) baseFilter.postedBy = userId ?? postedBy;
 
@@ -449,28 +488,30 @@ export const getAds = async (req, res) => {
     const feedFilter = { ...baseFilter };
 
     // ── Sort ─────────────────────────────────────────────────────────────────
-    // Feed priority (applied for "newest" and "popular" — not price sorts):
+    // Default feed priority (newest / popular / premium):
     //
     //  1. Boosted ads          (boost.isBoosted: true)  — absolute top
-    //  2. Active, not expired  (isNotExpired: 1)
+    //  2. Active, not expired  (isActiveAndFresh: 1)
     //     a. SuperSmile  (planPriority 3)
     //     b. HappySmile  (planPriority 2)
     //     c. BasicSmile  (planPriority 1)
     //     d. Smile/Basic (planPriority 0)
-    //  3. Expired ads          (isNotExpired: 0)         — bottom of feed
+    //  3. Expired ads          (isActiveAndFresh: 0)     — bottom of feed
     //
-    // We compute isNotExpired as a virtual sort field using $addFields in
-    // an aggregation pipeline for the default feed. Price/oldest sorts skip
-    // the plan priority to respect explicit user intent.
+    // Trending replaces that ladder with a single demand score. The weights
+    // put money and intent above vanity metrics: a search hit is five views
+    // because typing words is intent and scrolling is not, and a contact
+    // click is three because it is the closest thing to purchase intent we
+    // can observe before checkout.
     //
-    // For simplicity in the existing find() path, we map planPriority into
-    // the sort. Expired ads naturally sort last because they have been
-    // deprioritised by the expiresAt-based computed field.
-    // `now` is already declared earlier in getAds() — reuse it.
-
-    // For plan-aware sort we use aggregation; for explicit price sorts keep find().
+    // Price and oldest sorts skip plan weighting entirely — those are
+    // explicit user intent and should be obeyed literally.
     const usePlanSort =
-      !sort || sort === "newest" || sort === "popular" || sort === "premium";
+      !sort ||
+      sort === "newest" ||
+      sort === "popular" ||
+      sort === "premium" ||
+      sort === "trending";
 
     const sortMap = {
       newest: null, // handled by aggregation below
@@ -478,6 +519,8 @@ export const getAds = async (req, res) => {
       price_asc: { "price.amount": 1 },
       price_desc: { "price.amount": -1 },
       popular: null, // handled by aggregation below
+      premium: null, // handled by aggregation below
+      trending: null, // handled by aggregation below
     };
     const simpleSortQuery = sortMap[sort]; // null means use aggregation
 
@@ -485,10 +528,10 @@ export const getAds = async (req, res) => {
     const total = await Ad.countDocuments(feedFilter);
 
     if (usePlanSort) {
-      // Aggregation pipeline: add isActiveAndFresh virtual field for sort,
-      // then sort by boost → active → plan tier → secondary criterion
+      const isTrending = sort === "trending";
       const secondarySort =
         sort === "popular" ? { views: -1 } : { createdAt: -1 };
+
       ads = await Ad.aggregate([
         { $match: feedFilter },
         {
@@ -507,15 +550,37 @@ export const getAds = async (req, res) => {
                 0,
               ],
             },
+
+            // Demand score — only consulted when sort=trending
+            trendScore: {
+              $add: [
+                { $cond: [{ $eq: ["$boost.isBoosted", true] }, 10000, 0] },
+                {
+                  $multiply: [
+                    { $ifNull: ["$subscription.planPriority", 0] },
+                    1000,
+                  ],
+                },
+                { $multiply: [{ $ifNull: ["$searchHits", 0] }, 5] },
+                { $multiply: [{ $ifNull: ["$contactClicks", 0] }, 3] },
+                { $ifNull: ["$views", 0] },
+              ],
+            },
           },
         },
         {
-          $sort: {
-            "boost.isBoosted": -1, // boosted ads always first
-            isActiveAndFresh: -1, // active/fresh before expired
-            "subscription.planPriority": -1, // highest plan first within each group
-            ...secondarySort, // newest or most popular within same plan
-          },
+          $sort: isTrending
+            ? {
+                isActiveAndFresh: -1, // expired ads never trend
+                trendScore: -1,
+                createdAt: -1,
+              }
+            : {
+                "boost.isBoosted": -1, // boosted ads always first
+                isActiveAndFresh: -1, // active/fresh before expired
+                "subscription.planPriority": -1, // highest plan first within each group
+                ...secondarySort, // newest or most viewed within same plan
+              },
         },
         { $skip: skip },
         { $limit: lim },
@@ -533,7 +598,7 @@ export const getAds = async (req, res) => {
             postedBy: { $arrayElemAt: ["$postedByUser", 0] },
           },
         },
-        { $unset: "postedByUser" },
+        { $unset: ["postedByUser", "trendScore", "isActiveAndFresh"] },
       ]);
     } else {
       // Simple find for price/oldest sorts — user intent overrides plan priority
@@ -543,6 +608,19 @@ export const getAds = async (req, res) => {
         .limit(lim)
         .populate("postedBy", "username profilePicture")
         .lean();
+    }
+
+    // ── Record search demand ──────────────────────────────────────────────
+    // Every ad a search surfaces gets a hit, which feeds trendScore above.
+    // Fire-and-forget: a counter must never delay a search response, and a
+    // failed write is not worth failing the request over.
+    if (search && ads.length > 0) {
+      Ad.updateMany(
+        { _id: { $in: ads.map((a) => a._id) } },
+        { $inc: { searchHits: 1 } },
+      )
+        .exec()
+        .catch(() => {});
     }
 
     const feedPayload = {
@@ -584,7 +662,7 @@ export const getAds = async (req, res) => {
 export const getAdById = async (req, res) => {
   try {
     const ad = await Ad.findById(req.params.id)
-      .populate("postedBy", "username profilePicture phone")
+      .populate("postedBy", VENDOR_DETAIL_FIELDS)
       .lean();
 
     if (!ad || !ad.isActive) {
@@ -609,7 +687,7 @@ export const getAdBySlug = async (req, res) => {
       isActive: true,
       isSold: false,
     })
-      .populate("postedBy", "username profilePicture phone")
+      .populate("postedBy", VENDOR_DETAIL_FIELDS)
       .lean();
 
     if (!ad) return res.status(404).json({ message: "Ad not found" });
@@ -618,6 +696,7 @@ export const getAdBySlug = async (req, res) => {
 
     res.status(200).json({ ad: serializeAd(ad) });
   } catch (error) {
+    logError("getAdBySlug", error);
     res.status(500).json({ message: "Failed to fetch ad" });
   }
 };
@@ -672,6 +751,8 @@ export const updateAd = async (req, res) => {
       message: "Ad updated successfully",
       ad: serializeAd(ad),
     });
+
+    bustFeedCache(ad.location?.country || "Ghana").catch(() => {});
   } catch (error) {
     console.error("updateAd error:", error);
     res.status(500).json({ message: "Failed to update ad" });
@@ -707,12 +788,11 @@ export const deleteAd = async (req, res) => {
   }
 };
 
-// ── BOOST AD ───────────────────────────────────────────────────────────────
 // ── BOOST AD ──────────────────────────────────────────────────────────────
 // POST /ads/:id/boost
-// Boosting now requires payment. This endpoint redirects the vendor to
-// the payment flow. The actual boost activation happens in adBoostPaymentController
-// after Flutterwave confirms payment.
+// Boosting requires payment. This endpoint redirects the vendor to the
+// payment flow. Boost activation happens in adBoostPaymentController after
+// Flutterwave confirms payment.
 export const boostAd = async (req, res) => {
   try {
     const ad = await Ad.findById(req.params.id).select(
@@ -770,6 +850,8 @@ export const markAsSold = async (req, res) => {
     });
 
     res.status(200).json({ message: "Ad marked as sold" });
+
+    bustFeedCache(ad.location?.country || "Ghana").catch(() => {});
   } catch (error) {
     res.status(500).json({ message: "Failed to mark ad as sold" });
   }
@@ -796,13 +878,17 @@ export const togglePause = async (req, res) => {
       message: newPaused ? "Ad paused" : "Ad reactivated",
       isPaused: newPaused,
     });
+
+    bustFeedCache(ad.location?.country || "Ghana").catch(() => {});
   } catch (error) {
     res.status(500).json({ message: "Failed to toggle ad status" });
   }
 };
 
 // ── RECORD CONTACT CLICK ───────────────────────────────────────────────────
-// POST /ads/:id/contact-click  (called from frontend when user taps phone/whatsapp)
+// POST /ads/:id/contact-click
+// Called when a buyer taps phone or WhatsApp. Feeds trendScore, so it is
+// both an analytics counter and a ranking signal.
 export const recordContactClick = async (req, res) => {
   try {
     await Ad.findByIdAndUpdate(req.params.id, { $inc: { contactClicks: 1 } });
@@ -859,7 +945,7 @@ export const getMyAds = async (req, res) => {
       pausedCount,
       expiredCount,
       expiringSoonCount,
-      totalViews,
+      engagement,
     ] = await Promise.all([
       Ad.countDocuments({
         postedBy: userId,
@@ -884,10 +970,18 @@ export const getMyAds = async (req, res) => {
         isSold: false,
         expiresAt: { $gt: now, $lte: new Date(now.getTime() + 3 * 86400000) },
       }),
+      // Views, contact clicks and search hits in one pass
       Ad.aggregate([
         { $match: { postedBy: new mongoose.Types.ObjectId(userId) } },
-        { $group: { _id: null, total: { $sum: "$views" } } },
-      ]).then((r) => r[0]?.total ?? 0),
+        {
+          $group: {
+            _id: null,
+            totalViews: { $sum: { $ifNull: ["$views", 0] } },
+            totalContactClicks: { $sum: { $ifNull: ["$contactClicks", 0] } },
+            totalSearchHits: { $sum: { $ifNull: ["$searchHits", 0] } },
+          },
+        },
+      ]).then((r) => r[0] ?? {}),
     ]);
 
     res.status(200).json({
@@ -904,7 +998,10 @@ export const getMyAds = async (req, res) => {
         pausedCount,
         expiredCount,
         expiringSoonCount,
-        totalViews,
+        totalViews: engagement.totalViews ?? 0,
+        totalContactClicks: engagement.totalContactClicks ?? 0,
+        // How often this vendor's listings turned up in someone's search
+        totalSearchHits: engagement.totalSearchHits ?? 0,
       },
     });
   } catch (error) {
@@ -976,6 +1073,8 @@ export const moderateAd = async (req, res) => {
     );
 
     res.status(200).json({ message: `Ad ${status}`, ad: serializeAd(ad) });
+
+    bustFeedCache(ad.location?.country || "Ghana").catch(() => {});
   } catch (error) {
     console.error("moderateAd error:", error);
     res.status(500).json({ message: "Failed to moderate ad" });
