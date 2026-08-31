@@ -1,17 +1,31 @@
 // controllers/orderController.js
 //
-// Full order lifecycle:
-//   getMyOrders          — buyer's orders (extended with more fields for mobile)
-//   getVendorOrders      — vendor's received orders (kept as-is)
-//   getSingleOrder       — populated single-order detail (mobile + web)
-//   createOrder          — server-computes money math + policy snapshot
-//   initOrderPayment     — POST /orders/:id/pay → Flutterwave link
-//   verifyOrderPayment   — POST /orders/verify (mobile-callable)
-//   orderPaymentWebhook  — Flutterwave webhook (independent source of truth)
-//   confirmDelivery      — buyer releases escrow → vendor ledger credit
+// Full order lifecycle.
+//
+//   getMyOrders          — buyer's orders
+//   getVendorOrders      — vendor's received orders (their items only)
+//   getSingleOrder       — one populated order
+//   getOrderGroup        — every order in a multi-vendor checkout
+//   createOrder          — splits a cart into one order per vendor
+//   initOrderPayment     — one Flutterwave charge for a whole group
+//   verifyOrderPayment   — app calls this when the browser closes
+//   orderPaymentWebhook  — Flutterwave's confirmation (source of truth)
 //   updateOrderStatus    — vendor marks confirmed/dispatched/delivered/cancelled
-//   requestRefund        — buyer requests, vendor accepts/rejects from dashboard
-//   reportDispute        — freezes vendor payout for that order, admin intervenes
+//   confirmDelivery      — buyer releases escrow → vendor ledger credit
+//   requestRefund        — buyer requests, vendor resolves from dashboard
+//   reportDispute        — freezes payout, admin intervenes
+//
+// MULTI-VENDOR MODEL
+//   A cart spanning three vendors becomes three Order documents sharing one
+//   `orderGroup`. Each vendor sees and fulfils only their own items. The buyer
+//   pays once — the group total — and escrow releases per vendor, so
+//   confirming delivery from one doesn't pay out another.
+//
+// Requires on models/order.js:
+//   orderGroup:  { type: String, index: true },
+//   deliveryFee: { type: Number, default: 0 },
+
+import crypto from "crypto";
 
 import Order from "../models/orderModel.js";
 import Ad from "../models/adModel.js";
@@ -35,7 +49,7 @@ const COMMISSION_RATE = 0.05;
 /** Round to 2dp. Every money computation goes through this. */
 const money = (n) => Math.round(Number(n || 0) * 100) / 100;
 
-/** Compute commission + vendor payout from subtotal. Server-only. */
+/** Compute commission + vendor payout from a subtotal. Server-only. */
 function computeMoney(subtotal, rate = COMMISSION_RATE) {
   const s = money(subtotal);
   const commission = money(s * rate);
@@ -43,28 +57,41 @@ function computeMoney(subtotal, rate = COMMISSION_RATE) {
   return { subtotal: s, commissionAmount: commission, vendorPayout: payout };
 }
 
+/** Read a price off an ad. Handles { amount, currency } and legacy flat. */
+function adPrice(ad) {
+  const p = ad?.price;
+  if (p && typeof p === "object") return money(p.amount);
+  return money(p);
+}
+
+/** Read a currency off an ad, falling back to its country. */
+function adCurrency(ad) {
+  const p = ad?.price;
+  if (p && typeof p === "object" && p.currency) {
+    return String(p.currency).toUpperCase();
+  }
+  return ad?.location?.country === "Nigeria" ||
+    ad?.location?.countryCode === "NG"
+    ? "NGN"
+    : "GHS";
+}
 
 /** Category → payment model + escrow trigger + refund policy defaults. */
 function policyForCategory(catMain, vendorHasSubaccount) {
   const cat = String(catMain || "marketplace").toLowerCase();
 
-  // Split-at-source only works when vendor has a configured FLW subaccount
+  // Split-at-source only works when the vendor has a configured FLW subaccount
   const paymentModel =
     cat === "food" && vendorHasSubaccount ? "split_at_source" : "escrow";
 
   const escrowReleaseTrigger =
-    cat === "food"
-      ? "auto_on_delivery"
-      : cat === "properties"
-        ? "buyer_confirms"
-        : cat === "services" || cat === "jobs"
-          ? "buyer_confirms"
-          : "buyer_confirms";
+    cat === "food" ? "auto_on_delivery" : "buyer_confirms";
 
+  // "apartments" is the live category name; "properties" kept for old rows
   const refundPolicy =
     cat === "food"
       ? { type: "vendor_cancel" }
-      : cat === "properties"
+      : cat === "apartments" || cat === "properties"
         ? { type: "before_dispatch" }
         : cat === "services" || cat === "jobs"
           ? { type: "vendor_cancel" }
@@ -73,7 +100,7 @@ function policyForCategory(catMain, vendorHasSubaccount) {
   return { paymentModel, escrowReleaseTrigger, refundPolicy };
 }
 
-/** Given a policy snapshot + current status, is refund allowed right now? */
+/** Given a policy snapshot + current status, is a refund allowed right now? */
 function isRefundEligible(policy, status) {
   if (!policy || policy.type === "none") return false;
   if (["cancelled", "refunded"].includes(status)) return false;
@@ -84,32 +111,31 @@ function isRefundEligible(policy, status) {
     case "vendor_cancel":
       return status === "cancelled";
     case "window":
-      // Window is enforced against deliveredAt at request time
+      // Day count is enforced against deliveredAt at request time
       return true;
     default:
       return true;
   }
 }
 
-/** Given order.currency, which Flutterwave country config to use. */
+/** Which Flutterwave country config a currency maps to. */
 function countryFromCurrency(currency) {
   return currency === "NGN" ? "NG" : "GH";
 }
 
-/** Currency symbol for SMS/email display. */
+/** Currency symbol for SMS and notification copy. */
 const sym = (c) => (c === "NGN" ? "₦" : "₵");
 
 // ═══════════════════════════════════════════════════════════════════════
-// GET /orders/my (aliased at /orders/mine for mobile compatibility)
+// GET /orders/my   (aliased at /orders/mine)
 // ═══════════════════════════════════════════════════════════════════════
 export const getMyOrders = async (req, res) => {
   try {
     const filter = { buyer: req.user.userId };
 
-    // Optional status filter — "active" = paid/confirmed/dispatched
     const s = req.query.status;
     if (s === "active") {
-      filter.status = { $in: ["confirmed", "dispatched", "pending"] };
+      filter.status = { $in: ["pending", "confirmed", "dispatched"] };
     } else if (s && s !== "all") {
       filter.status = s;
     }
@@ -119,7 +145,7 @@ export const getMyOrders = async (req, res) => {
     const orders = await Order.find(filter)
       .sort({ createdAt: -1 })
       .limit(limit)
-      .populate("vendor", "username storeName storePhone")
+      .populate("vendor", "username storeName storePhone storeSlug")
       .populate("ad", "title coverImage images")
       .lean();
 
@@ -127,9 +153,10 @@ export const getMyOrders = async (req, res) => {
       orders: orders.map((o) => ({
         _id: String(o._id),
         orderNumber: String(o._id).slice(-6).toUpperCase(),
+        orderGroup: o.orderGroup ?? null,
         items: (o.items ?? []).map((it) => ({
           ...it,
-          image: o.ad?.coverImage ?? o.ad?.images?.[0] ?? null,
+          image: o.ad?.coverImage ?? o.ad?.images?.[0]?.url ?? null,
           title: it.name,
           quantity: it.qty,
         })),
@@ -149,6 +176,7 @@ export const getMyOrders = async (req, res) => {
               _id: String(o.vendor._id),
               storeName: o.vendor.storeName ?? o.vendor.username,
               storePhone: o.vendor.storePhone,
+              storeSlug: o.vendor.storeSlug,
             }
           : null,
         deliveryAddress: parseAddress(o.deliveryAddress),
@@ -166,7 +194,7 @@ export const getMyOrders = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// GET /orders/vendor (unchanged from your original)
+// GET /orders/vendor — a vendor only ever sees their own orders
 // ═══════════════════════════════════════════════════════════════════════
 export const getVendorOrders = async (req, res) => {
   try {
@@ -182,25 +210,37 @@ export const getVendorOrders = async (req, res) => {
         .skip(skip)
         .limit(Number(limit))
         .populate("buyer", "username phone")
-        .populate("ad", "title")
+        .populate("ad", "title coverImage images")
         .lean(),
     ]);
 
     res.status(200).json({
       orders: orders.map((o) => ({
         _id: String(o._id),
-        items: o.items ?? [],
+        orderNumber: String(o._id).slice(-6).toUpperCase(),
+        items: (o.items ?? []).map((it) => ({
+          ...it,
+          title: it.name,
+          quantity: it.qty,
+        })),
         total: o.total ?? 0,
         commissionAmount: o.commissionAmount ?? 0,
         vendorPayout: o.vendorPayout ?? 0,
         currency: o.currency ?? "GHS",
+        symbol: sym(o.currency ?? "GHS"),
         status: o.status ?? "pending",
         buyer: o.buyer?.username ?? "Customer",
-        buyerPhone: o.buyer?.phone ?? "",
+        // Buyer phone only once they've actually paid — no lead scraping
+        buyerPhone: ["pending"].includes(o.status)
+          ? ""
+          : (o.buyer?.phone ?? ""),
         adTitle: o.ad?.title ?? "",
-        deliveryAddress: o.deliveryAddress ?? "",
+        image: o.ad?.coverImage ?? o.ad?.images?.[0]?.url ?? null,
+        deliveryAddress: parseAddress(o.deliveryAddress),
         paymentModel: o.paymentModel,
         escrowStatus: o.escrowStatus,
+        refundRequestedAt: o.refundRequestedAt ?? null,
+        refundReason: o.refundReason ?? null,
         createdAt: o.createdAt,
       })),
       meta: { total, page: Number(page), limit: Number(limit) },
@@ -212,7 +252,54 @@ export const getVendorOrders = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// GET /orders/:id — single order detail (buyer or vendor or admin)
+// GET /orders/group/:groupId — every order from one checkout
+// ═══════════════════════════════════════════════════════════════════════
+export const getOrderGroup = async (req, res) => {
+  try {
+    const orders = await Order.find({
+      orderGroup: req.params.groupId,
+      buyer: req.user.userId,
+    })
+      .populate("vendor", "username storeName storePhone storeSlug")
+      .populate("ad", "title coverImage images")
+      .lean();
+
+    if (orders.length === 0) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const total = money(orders.reduce((s, o) => s + (o.total ?? 0), 0));
+
+    res.status(200).json({
+      orderGroup: req.params.groupId,
+      orders: orders.map((o) => ({
+        ...sanitiseOrder(o),
+        vendor: o.vendor
+          ? {
+              _id: String(o.vendor._id),
+              storeName: o.vendor.storeName ?? o.vendor.username,
+              storeSlug: o.vendor.storeSlug,
+            }
+          : null,
+        image: o.ad?.coverImage ?? o.ad?.images?.[0]?.url ?? null,
+      })),
+      summary: {
+        subtotal: total,
+        total,
+        currency: orders[0].currency ?? "GHS",
+        symbol: sym(orders[0].currency ?? "GHS"),
+        vendorCount: orders.length,
+        allPaid: orders.every((o) => o.status !== "pending"),
+      },
+    });
+  } catch (err) {
+    console.error("[getOrderGroup]", err);
+    res.status(500).json({ message: "Failed to fetch order" });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// GET /orders/:id — buyer, vendor, or admin
 // ═══════════════════════════════════════════════════════════════════════
 export const getSingleOrder = async (req, res) => {
   try {
@@ -237,9 +324,10 @@ export const getSingleOrder = async (req, res) => {
       order: {
         _id: String(order._id),
         orderNumber: String(order._id).slice(-6).toUpperCase(),
+        orderGroup: order.orderGroup ?? null,
         items: (order.items ?? []).map((it) => ({
           ...it,
-          image: order.ad?.coverImage ?? order.ad?.images?.[0] ?? null,
+          image: order.ad?.coverImage ?? order.ad?.images?.[0]?.url ?? null,
           title: it.name,
           quantity: it.qty,
         })),
@@ -286,162 +374,206 @@ export const getSingleOrder = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// POST /orders — server owns all money math
+// POST /orders
+//
+// Body: { items: [{ adId, quantity }], deliveryAddress, paymentMethod, notes }
+// Legacy single-ad body { adId } still works.
+//
+// The client sends ids and quantities only. Every price, subtotal,
+// commission and payout is computed here from the Ad documents.
 // ═══════════════════════════════════════════════════════════════════════
 export const createOrder = async (req, res) => {
   try {
     const buyerId = req.user.userId;
     const {
-      adId: singleAdId, // legacy: single-ad orders (your existing shape)
-      items: bodyItems, // new: array of { adId, quantity } OR { adId, qty }
+      adId: legacyAdId,
+      items: bodyItems,
       deliveryAddress,
       paymentMethod = "momo",
       notes,
-      currency: requestedCurrency, // hint only — vendor's currency wins
     } = req.body;
 
-    // ── Normalise inputs — support BOTH shapes ─────────────────────────
-    // Legacy: { adId, items: [{name,qty,price}] } → keep as-is
-    // Mobile: { items: [{ adId, quantity }] }    → derive from ads
-    let orderLines;
+    // ── Collapse the request into adId → quantity ────────────────────
+    const wanted = new Map();
 
-    if (singleAdId && Array.isArray(bodyItems) && bodyItems[0]?.price != null) {
-      // Legacy path — one ad, client-supplied items
-      orderLines = [
-        {
-          adId: singleAdId,
-          items: bodyItems.map((i) => ({
-            qty: Math.max(1, parseInt(i.qty ?? i.quantity ?? 1, 10)),
-          })),
-        },
-      ];
-    } else if (Array.isArray(bodyItems) && bodyItems.length > 0) {
-      // Mobile path — group by adId (in case multiple entries of same ad)
-      const byAd = new Map();
+    if (Array.isArray(bodyItems) && bodyItems.length > 0) {
       for (const it of bodyItems) {
-        const adId = String(it.adId || "").trim();
-        if (!adId) continue;
-        const qty = Math.max(1, parseInt(it.qty ?? it.quantity ?? 1, 10));
-        byAd.set(adId, (byAd.get(adId) ?? 0) + qty);
+        const id = String(it.adId ?? it.id ?? "").trim();
+        if (!id) continue;
+        const qty = Math.max(1, parseInt(it.quantity ?? it.qty ?? 1, 10) || 1);
+        wanted.set(id, (wanted.get(id) ?? 0) + qty);
       }
-      orderLines = [...byAd.entries()].map(([adId, qty]) => ({
-        adId,
-        items: [{ qty }],
-      }));
-    } else {
-      return res.status(400).json({ message: "items array is required" });
+    } else if (legacyAdId) {
+      const qty = Math.max(
+        1,
+        parseInt(bodyItems?.[0]?.qty ?? bodyItems?.[0]?.quantity ?? 1, 10) || 1,
+      );
+      wanted.set(String(legacyAdId), qty);
     }
 
-    if (orderLines.length === 0) {
-      return res.status(400).json({ message: "No valid items in request" });
+    if (wanted.size === 0) {
+      return res.status(400).json({ message: "Your cart is empty." });
     }
 
-    // ── Fetch all ads with vendors (single query) ──────────────────────
-    const adIds = orderLines.map((l) => l.adId);
+    // ── Load every ad with its vendor, one query ─────────────────────
+    const adIds = [...wanted.keys()];
     const ads = await Ad.find({ _id: { $in: adIds } })
       .populate(
         "postedBy",
-        "storeName storePhone phone username currency country flwSubaccountId email",
+        "username storeName storePhone phone whatsapp email flwSubaccountId",
       )
       .lean();
 
     if (ads.length !== adIds.length) {
+      const found = new Set(ads.map((a) => String(a._id)));
       return res.status(400).json({
-        message: "One or more items are no longer available",
+        message: "Some items are no longer available. Please review your cart.",
+        code: "ITEMS_UNAVAILABLE",
+        unavailable: adIds.filter((id) => !found.has(id)),
       });
     }
 
-    // ── Enforce single-vendor per order (MVP) ──────────────────────────
-    const vendorIds = [...new Set(ads.map((a) => String(a.postedBy?._id)))];
-    if (vendorIds.length > 1) {
+    // ── Reject anything not actually buyable ─────────────────────────
+    const gone = ads.filter(
+      (a) => a.isSold || a.isPaused || a.isActive === false,
+    );
+    if (gone.length > 0) {
+      return res.status(400).json({
+        message: `"${gone[0].title}" is no longer available.`,
+        code: "ITEMS_UNAVAILABLE",
+        unavailable: gone.map((a) => String(a._id)),
+      });
+    }
+
+    // ── One currency per checkout ────────────────────────────────────
+    const currencies = new Set(ads.map(adCurrency));
+    if (currencies.size > 1) {
       return res.status(400).json({
         message:
-          "This cart has items from multiple vendors. Please check them out one vendor at a time.",
-        code: "MULTI_VENDOR_UNSUPPORTED",
-        vendors: vendorIds,
+          "Your cart mixes currencies. Please check out one country's items at a time.",
+        code: "MIXED_CURRENCY",
       });
     }
+    const currency = [...currencies][0] ?? "GHS";
 
-    const vendor = ads[0].postedBy;
-    if (!vendor?._id) {
-      return res
-        .status(400)
-        .json({ message: "Vendor not found for this listing" });
-    }
+    // ── Group the cart by vendor ─────────────────────────────────────
+    const byVendor = new Map(); // vendorId → { vendor, lines[] }
 
-    // ── Prevent buyer from buying own listing ──────────────────────────
-    if (String(vendor._id) === String(buyerId)) {
-      return res
-        .status(400)
-        .json({ message: "You can't buy your own listing" });
-    }
-
-    // ── Currency: vendor's country decides ─────────────────────────────
-    const currency =
-      primaryAd.price?.currency ??
-      (primaryAd.location?.country === "Nigeria" ? "NGN" : "GHS");
-
-    // ── Build items array from server-side data ────────────────────────
-    const items = [];
-    for (const line of orderLines) {
-      const ad = ads.find((a) => String(a._id) === String(line.adId));
-      const price = money(ad.price?.amount ?? ad.price);
-      if (price <= 0) {
+    for (const ad of ads) {
+      const vendor = ad.postedBy;
+      if (!vendor?._id) {
         return res.status(400).json({
-          message: `"${ad.title}" has no valid price. Contact the vendor.`,
+          message: `"${ad.title}" has no vendor attached. Please contact support.`,
         });
       }
-      const totalQty = line.items.reduce((s, i) => s + i.qty, 0);
-      items.push({
-        name: ad.title,
-        qty: totalQty,
+
+      const vendorId = String(vendor._id);
+      if (vendorId === String(buyerId)) {
+        return res.status(400).json({
+          message: "You can't buy your own listing.",
+          code: "OWN_LISTING",
+        });
+      }
+
+      const price = adPrice(ad);
+      if (!(price > 0)) {
+        return res.status(400).json({
+          message: `"${ad.title}" doesn't have a price set. Message the vendor instead.`,
+          code: "NO_PRICE",
+        });
+      }
+
+      if (!byVendor.has(vendorId))
+        byVendor.set(vendorId, { vendor, lines: [] });
+      byVendor.get(vendorId).lines.push({
+        ad,
+        qty: wanted.get(String(ad._id)),
         price,
       });
     }
 
-    // ── Money math (server-only) ───────────────────────────────────────
-    const subtotal = items.reduce((s, i) => s + i.price * i.qty, 0);
-    const { commissionAmount, vendorPayout } = computeMoney(subtotal);
-    const total = money(subtotal); // delivery fee added by vendor when known
+    // ── Build one order document per vendor ──────────────────────────
+    const orderGroup = crypto.randomUUID();
+    const isCash = paymentMethod === "cash";
+    const addressStr =
+      typeof deliveryAddress === "object"
+        ? JSON.stringify(deliveryAddress)
+        : (deliveryAddress ?? "");
+    const multiVendor = byVendor.size > 1;
 
-    // ── Category-driven policy ─────────────────────────────────────────
-    const catMain = ads[0].category?.main;
-    const { paymentModel, escrowReleaseTrigger, refundPolicy } =
-      policyForCategory(catMain, !!vendor.flwSubaccountId);
+    const docs = [];
 
-    // ── Persist ────────────────────────────────────────────────────────
-    const order = await Order.create({
-      buyer: buyerId,
-      vendor: vendor._id,
-      ad: ads[0]._id, // primary ad (single-vendor MVP)
-      items,
-      total,
-      currency,
-      status: paymentMethod === "cash" ? "confirmed" : "pending",
-      deliveryAddress:
-        typeof deliveryAddress === "object"
-          ? JSON.stringify(deliveryAddress)
-          : (deliveryAddress ?? ""),
-      notes: notes ?? "",
+    for (const [, { vendor, lines }] of byVendor) {
+      const items = lines.map((l) => ({
+        ad: l.ad._id,
+        name: l.ad.title,
+        qty: l.qty,
+        price: l.price,
+      }));
 
-      commissionRate: COMMISSION_RATE,
-      commissionAmount,
-      vendorPayout,
+      const rawSubtotal = lines.reduce((s, l) => s + l.price * l.qty, 0);
+      const { subtotal, commissionAmount, vendorPayout } =
+        computeMoney(rawSubtotal);
 
-      escrowStatus: paymentMethod === "cash" ? "n/a" : "held",
-      escrowReleaseTrigger,
-      paymentModel: paymentMethod === "cash" ? "escrow" : paymentModel,
-      refundPolicy,
-      refundEligible: refundPolicy.type !== "none",
-      flwSubaccountId: vendor.flwSubaccountId ?? null,
+      const catMain = lines[0].ad.category?.main;
+      const { paymentModel, escrowReleaseTrigger, refundPolicy } =
+        policyForCategory(catMain, !!vendor.flwSubaccountId);
+
+      docs.push({
+        buyer: buyerId,
+        vendor: vendor._id,
+        ad: lines[0].ad._id, // primary ad, used for thumbnails
+        orderGroup,
+        items,
+        total: subtotal, // delivery fee added by the vendor when known
+        currency,
+        status: isCash ? "confirmed" : "pending",
+        deliveryAddress: addressStr,
+        notes: notes ?? "",
+
+        commissionRate: COMMISSION_RATE,
+        commissionAmount,
+        vendorPayout,
+
+        escrowStatus: isCash ? "n/a" : "held",
+        escrowReleaseTrigger,
+        // Flutterwave can only split to one subaccount per charge, so a
+        // multi-vendor group always falls back to escrow.
+        paymentModel: isCash || multiVendor ? "escrow" : paymentModel,
+        refundPolicy,
+        refundEligible: refundPolicy.type !== "none",
+        flwSubaccountId: vendor.flwSubaccountId ?? null,
+      });
+    }
+
+    const orders = await Order.insertMany(docs);
+    const grandTotal = money(orders.reduce((s, o) => s + o.total, 0));
+
+    res.status(201).json({
+      message: "Order placed successfully",
+      orderGroup,
+      orders: orders.map(sanitiseOrder),
+      order: sanitiseOrder(orders[0]), // older clients expect a single order
+      vendorCount: orders.length,
+      summary: {
+        subtotal: grandTotal,
+        total: grandTotal,
+        currency,
+        symbol: sym(currency),
+      },
     });
 
-    res.status(201).json({ message: "Order placed successfully", order });
-
-    // ── Notifications (non-blocking) ───────────────────────────────────
-    notifyVendorOfNewOrder({ order, ad: ads[0], vendor, currency }).catch((e) =>
-      console.error("[notifyVendorOfNewOrder]", e.message),
-    );
+    // ── Notify each vendor about their slice ─────────────────────────
+    for (const [vendorId, { vendor, lines }] of byVendor) {
+      const order = orders.find((o) => String(o.vendor) === vendorId);
+      if (!order) continue;
+      notifyVendorOfNewOrder({
+        order,
+        ad: lines[0].ad,
+        vendor,
+        currency,
+      }).catch((e) => console.error("[notifyVendorOfNewOrder]", e.message));
+    }
   } catch (err) {
     console.error("[createOrder]", err);
     res.status(500).json({
@@ -451,100 +583,109 @@ export const createOrder = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// POST /orders/:id/pay — init Flutterwave for this order
+// POST /orders/group/:groupId/pay   — one charge for the whole cart
+// POST /orders/:id/pay              — single order
 // ═══════════════════════════════════════════════════════════════════════
 export const initOrderPayment = async (req, res) => {
   try {
     const buyerId = req.user.userId;
-    const order = await Order.findById(req.params.id);
-    if (!order) return res.status(404).json({ message: "Order not found" });
+    const { groupId, id } = req.params;
 
-    if (String(order.buyer) !== String(buyerId)) {
-      return res.status(403).json({ message: "Not authorised" });
+    const orders = groupId
+      ? await Order.find({ orderGroup: groupId, buyer: buyerId })
+      : await Order.find({ _id: id, buyer: buyerId });
+
+    if (orders.length === 0) {
+      return res.status(404).json({ message: "Order not found" });
     }
 
-    if (!["pending"].includes(order.status)) {
+    const payable = orders.filter((o) => o.status === "pending");
+    if (payable.length === 0) {
       return res.status(409).json({
-        message: "This order can't be paid for right now.",
-        currentStatus: order.status,
+        message: "This order has already been paid for.",
+        currentStatus: orders[0].status,
       });
     }
 
-    const [buyer, vendor] = await Promise.all([
-      User.findById(buyerId).select("email username phone whatsapp").lean(),
-      User.findById(order.vendor).select("flwSubaccountId storeName").lean(),
-    ]);
+    const currency = payable[0].currency;
+    const amount = money(payable.reduce((s, o) => s + o.total, 0));
+    const groupRef = payable[0].orderGroup ?? String(payable[0]._id);
 
-    // Fresh tx_ref every attempt so a failed payment can be retried without collision
-    const tx_ref = `smilebaba-order-${order._id}-${Date.now()}`;
-    order.flwTxRef = tx_ref;
-    await order.save();
+    const buyer = await User.findById(buyerId)
+      .select("email username phone whatsapp")
+      .lean();
 
-    // Resolve URLs (mirrors your subscription controller)
-    const backendBase = (
-      process.env.BACKEND_URL ??
-      process.env.RENDER_EXTERNAL_URL ??
-      `${req.protocol}://${req.get("host")}`
-    ).replace(/\/+$/, "");
+    // Fresh ref every attempt so a failed payment can be retried cleanly
+    const tx_ref = `smilebaba-order-${groupRef}-${Date.now()}`;
+    await Order.updateMany(
+      { _id: { $in: payable.map((o) => o._id) } },
+      { $set: { flwTxRef: tx_ref } },
+    );
+
     const frontendBase = (
       process.env.NEXT_PUBLIC_APP_URL ??
       process.env.FRONTEND_URL ??
-      "https://smilebabahub.com"
+      "https://www.smilebabahub.com"
     ).replace(/\/+$/, "");
-
-    // FLW redirects here after payment; static success page is fine because
-    // mobile independently calls POST /orders/verify after browser closes.
-    const redirect_url = `${frontendBase}/checkout/complete?order=${order._id}`;
 
     const payload = {
       tx_ref,
-      amount: order.total,
-      currency: order.currency,
-      redirect_url,
+      amount,
+      currency,
+      redirect_url: `${frontendBase}/checkout/complete?group=${groupRef}`,
       customer: {
         email: buyer?.email ?? "customer@smilebabahub.com",
         name: buyer?.username ?? "SmileBaba Customer",
         phonenumber: buyer?.phone ?? buyer?.whatsapp ?? "0000000000",
       },
       meta: {
-        orderId: String(order._id),
+        purpose: "order",
+        orderGroup: groupRef,
+        orderIds: payable.map((o) => String(o._id)).join(","),
+        orderId: String(payable[0]._id), // legacy webhook compatibility
         buyerId: String(buyerId),
-        vendorId: String(order.vendor),
-        purpose: "order", // distinguishes from subscription meta
-        currency: order.currency,
+        currency,
       },
       customizations: {
         title: "SmileBaba Hub",
-        description: `Order from ${vendor?.storeName ?? "SmileBaba vendor"}`,
+        description:
+          payable.length === 1
+            ? "Your SmileBaba order"
+            : `Order from ${payable.length} vendors`,
         logo: `${frontendBase}/logo.png`,
         color: "#ffc105",
       },
     };
 
-    // Split-at-source: add subaccount ONLY when vendor has one AND model is split
-    if (order.paymentModel === "split_at_source" && vendor?.flwSubaccountId) {
-      // Flutterwave splits by ratio; vendor gets (100 - commission) percent
-      const vendorPercent = Math.round((1 - COMMISSION_RATE) * 100);
-      payload.subaccounts = [
-        {
-          id: vendor.flwSubaccountId,
-          transaction_split_ratio: vendorPercent,
-        },
-      ];
+    // Split-at-source only when a single vendor with a configured subaccount
+    if (payable.length === 1 && payable[0].paymentModel === "split_at_source") {
+      const vendor = await User.findById(payable[0].vendor)
+        .select("flwSubaccountId")
+        .lean();
+      if (vendor?.flwSubaccountId) {
+        payload.subaccounts = [
+          {
+            id: vendor.flwSubaccountId,
+            transaction_split_ratio: Math.round((1 - COMMISSION_RATE) * 100),
+          },
+        ];
+      }
     }
 
-    const countryCode = countryFromCurrency(order.currency);
     const { paymentLink } = await initializeGatewayPayment({
-      countryCode,
+      countryCode: countryFromCurrency(currency),
       payload,
     });
 
     res.status(200).json({
       paymentLink,
-      link: paymentLink, // alias — mobile code accepts either
+      link: paymentLink, // aliases — the app accepts any of these
       checkoutUrl: paymentLink,
       tx_ref,
-      orderId: String(order._id),
+      orderGroup: groupRef,
+      orderId: String(payable[0]._id),
+      amount,
+      currency,
     });
   } catch (err) {
     const msg =
@@ -557,78 +698,87 @@ export const initOrderPayment = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// POST /orders/verify — mobile calls this after browser closes
+// POST /orders/verify   { orderGroup } or { orderId }
 // ═══════════════════════════════════════════════════════════════════════
 export const verifyOrderPayment = async (req, res) => {
   try {
-    const { orderId, transaction_id } = req.body;
-    if (!orderId)
-      return res.status(400).json({ message: "orderId is required" });
+    const { orderGroup, orderId, transaction_id } = req.body;
+    const buyerId = req.user.userId;
 
-    const order = await Order.findById(orderId);
-    if (!order) return res.status(404).json({ message: "Order not found" });
-
-    if (String(order.buyer) !== String(req.user.userId)) {
-      return res.status(403).json({ message: "Not authorised" });
+    if (!orderGroup && !orderId) {
+      return res
+        .status(400)
+        .json({ message: "orderGroup or orderId is required" });
     }
 
-    // Already finalised — return current state
-    if (
-      ["confirmed", "dispatched", "delivered", "cancelled"].includes(
-        order.status,
-      )
-    ) {
+    const orders = orderGroup
+      ? await Order.find({ orderGroup, buyer: buyerId })
+      : await Order.find({ _id: orderId, buyer: buyerId });
+
+    if (orders.length === 0) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const pending = orders.filter((o) => o.status === "pending");
+
+    // Already settled — the webhook probably beat us here
+    if (pending.length === 0) {
       return res.status(200).json({
-        status: order.status === "pending" ? "pending" : "paid",
-        order: sanitiseOrder(order),
+        status: "paid",
+        orders: orders.map(sanitiseOrder),
+        order: sanitiseOrder(orders[0]),
       });
     }
 
-    const countryCode = countryFromCurrency(order.currency);
-
-    // If mobile passed transaction_id, use it; otherwise ask FLW by tx_ref
     let payment;
     try {
       payment = await verifyGatewayPayment({
-        countryCode,
-        transactionId: transaction_id ?? order.flwTxRef,
+        countryCode: countryFromCurrency(pending[0].currency),
+        transactionId: transaction_id ?? pending[0].flwTxRef,
       });
     } catch (e) {
-      // Verification failure → probably still pending
       console.warn("[verifyOrderPayment] gateway lookup failed:", e.message);
       return res.status(200).json({
         status: "pending",
-        order: sanitiseOrder(order),
+        orders: orders.map(sanitiseOrder),
+        order: sanitiseOrder(orders[0]),
       });
     }
 
     if (payment?.status !== "successful") {
       return res.status(200).json({
         status: payment?.status === "pending" ? "pending" : "failed",
-        order: sanitiseOrder(order),
+        orders: orders.map(sanitiseOrder),
+        order: sanitiseOrder(orders[0]),
       });
     }
 
-    // Guard against amount tampering (allow overpayment for FLW fees; reject underpay >5%)
-    const diff = Number(payment.amount) - order.total;
-    if (diff < 0 && Math.abs(diff) / order.total > 0.05) {
+    // Amount is checked against the GROUP total, not one order.
+    // Overpayment is fine (gateway fees); underpayment beyond 5% is refused.
+    const expected = money(pending.reduce((s, o) => s + o.total, 0));
+    const diff = Number(payment.amount) - expected;
+    if (diff < 0 && Math.abs(diff) / expected > 0.05) {
       console.error("[verifyOrderPayment] underpayment", {
         paid: payment.amount,
-        expected: order.total,
+        expected,
       });
       return res.status(400).json({
-        message: "Payment amount doesn't match order total",
+        message: "Payment amount doesn't match your order total",
       });
     }
 
-    // Finalise (idempotent — only writes on first successful verify)
-    await markOrderPaid({ order, payment });
+    for (const order of pending) {
+      await markOrderPaid({ order, payment });
+    }
 
-    // Reload fresh
-    const updated = await Order.findById(orderId).lean();
+    const fresh = await Order.find({
+      _id: { $in: orders.map((o) => o._id) },
+    }).lean();
+
     res.status(200).json({
       status: "paid",
-      order: sanitiseOrder(updated),
+      orders: fresh.map(sanitiseOrder),
+      order: sanitiseOrder(fresh[0]),
     });
   } catch (err) {
     console.error("[verifyOrderPayment]", err);
@@ -637,14 +787,11 @@ export const verifyOrderPayment = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// POST /orders/webhook — Flutterwave server-to-server confirmation
-// (Register raw-body parser in server.js for this path)
+// POST /orders/webhook — Flutterwave's confirmation.
+// Register the raw-body parser for this path in server.js.
 // ═══════════════════════════════════════════════════════════════════════
 export const orderPaymentWebhook = async (req, res) => {
   try {
-    // Signature check — figure out country from URL if pattern is
-    // /orders/gh/webhook or /orders/ng/webhook; otherwise try both.
-    // Simpler: FLW single-secret setup — verify with a "unknown" flag
     const countryCode = req.countryCode ?? "GH";
 
     const isValid = verifyWebhookSignature({
@@ -657,7 +804,6 @@ export const orderPaymentWebhook = async (req, res) => {
       return res.status(401).end();
     }
 
-    // Body may be Buffer (raw) or already parsed — handle both
     const payload = Buffer.isBuffer(req.body)
       ? JSON.parse(req.body.toString("utf8"))
       : req.body;
@@ -673,60 +819,70 @@ export const orderPaymentWebhook = async (req, res) => {
 
     const data = payload.data;
 
-    // Normalise meta (same shape logic as subscription webhook)
+    // Meta arrives either as an object or an array of {metaname, metavalue}
     const rawMeta = data.meta ?? data.payment_meta ?? data.metadata ?? {};
     const meta = Array.isArray(rawMeta)
       ? rawMeta.reduce((acc, i) => ({ ...acc, [i.metaname]: i.metavalue }), {})
       : rawMeta;
 
-    // Only handle order payments (skip subscription webhook overlap)
-    if (meta.purpose !== "order" || !meta.orderId) {
+    // Ignore subscription and boost webhooks that share this endpoint shape
+    if (meta.purpose !== "order") return res.status(200).end();
+
+    // Resolve the orders this charge covers — group first, then legacy id
+    let orders = [];
+    if (meta.orderGroup) {
+      orders = await Order.find({ orderGroup: meta.orderGroup });
+    } else if (meta.orderIds) {
+      orders = await Order.find({
+        _id: { $in: String(meta.orderIds).split(",").filter(Boolean) },
+      });
+    } else if (meta.orderId) {
+      const one = await Order.findById(meta.orderId);
+      if (one) orders = [one];
+    }
+
+    if (orders.length === 0) {
+      console.warn("[orderPaymentWebhook] no orders for meta:", meta);
       return res.status(200).end();
     }
 
-    const order = await Order.findById(meta.orderId);
-    if (!order) {
-      console.warn("[orderPaymentWebhook] order not found:", meta.orderId);
-      return res.status(200).end();
-    }
+    const pending = orders.filter((o) => o.status === "pending");
+    if (pending.length === 0) return res.status(200).end(); // idempotent
 
-    // Idempotent: skip if already paid
-    if (order.status !== "pending") {
-      return res.status(200).end();
-    }
+    const amount = Number(data.charged_amount ?? data.amount);
+    const expected = money(pending.reduce((s, o) => s + o.total, 0));
+    const diff = amount - expected;
 
-    const amount = data.charged_amount ?? data.amount;
-
-    // Same tolerance rules
-    const diff = Number(amount) - order.total;
-    if (diff < 0 && Math.abs(diff) / order.total > 0.05) {
+    if (diff < 0 && Math.abs(diff) / expected > 0.05) {
       console.error("[orderPaymentWebhook] underpayment", {
         paid: amount,
-        expected: order.total,
-        orderId: order._id,
+        expected,
+        orderGroup: meta.orderGroup,
       });
       return res.status(200).end();
     }
 
-    await markOrderPaid({
-      order,
-      payment: {
-        id: data.id,
-        amount,
-        currency: data.currency,
-        tx_ref: data.tx_ref ?? data.reference,
-      },
-    });
+    for (const order of pending) {
+      await markOrderPaid({
+        order,
+        payment: {
+          id: data.id,
+          amount,
+          currency: data.currency,
+          tx_ref: data.tx_ref ?? data.reference,
+        },
+      });
+    }
 
     res.status(200).end();
   } catch (err) {
     console.error("[orderPaymentWebhook]", err);
-    res.status(200).end(); // always 200 to prevent FLW retry loops
+    res.status(200).end(); // always 200 — never trigger a retry loop
   }
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// PATCH /orders/:id/status — vendor updates
+// PATCH /orders/:id/status — vendor moves their own order along
 // ═══════════════════════════════════════════════════════════════════════
 export const updateOrderStatus = async (req, res) => {
   try {
@@ -746,11 +902,17 @@ export const updateOrderStatus = async (req, res) => {
       return res.status(403).json({ message: "Not authorised" });
     }
 
+    if (order.status === "pending" && status !== "cancelled") {
+      return res.status(409).json({
+        message: "This order hasn't been paid for yet.",
+      });
+    }
+
     order.status = status;
     if (status === "dispatched") order.shippedAt = new Date();
     if (status === "delivered") order.deliveredAt = new Date();
 
-    // For food (auto_on_delivery), vendor marking delivered releases escrow
+    // Food releases escrow when the vendor marks it delivered
     if (
       status === "delivered" &&
       order.escrowReleaseTrigger === "auto_on_delivery"
@@ -761,11 +923,11 @@ export const updateOrderStatus = async (req, res) => {
     await order.save();
     res.status(200).json({ message: "Order status updated", order });
 
-    // SMS to buyer (unchanged)
     const [buyer, orderAd] = await Promise.all([
       User.findById(order.buyer).select("phone").lean(),
       Ad.findById(order.ad).select("category.main").lean(),
     ]);
+
     if (buyer?.phone) {
       const isDelivery = orderAd?.category?.main === "delivery";
       const msgs = {
@@ -775,7 +937,7 @@ export const updateOrderStatus = async (req, res) => {
         dispatched: `SmileBaba: Your order is on the way! 🛵 Track progress in the app.`,
         delivered: isDelivery
           ? `SmileBaba: Delivery complete! Your item has arrived. 📦`
-          : `SmileBaba: Your order has been delivered. Enjoy! 🎉`,
+          : `SmileBaba: Your order has been delivered. Confirm in the app to release payment.`,
         cancelled: `SmileBaba: Your order was cancelled. Contact support if this is unexpected.`,
       };
       sendSMS(buyer.phone, msgs[status]).catch((e) =>
@@ -789,7 +951,7 @@ export const updateOrderStatus = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// POST /orders/:id/confirm-delivery — buyer releases escrow
+// POST /orders/:id/confirm-delivery — buyer releases this vendor's escrow
 // ═══════════════════════════════════════════════════════════════════════
 export const confirmDelivery = async (req, res) => {
   try {
@@ -800,14 +962,21 @@ export const confirmDelivery = async (req, res) => {
       return res.status(403).json({ message: "Not authorised" });
     }
 
-    if (!["dispatched", "confirmed"].includes(order.status)) {
+    if (!["dispatched", "confirmed", "delivered"].includes(order.status)) {
       return res.status(409).json({
         message: `Can't confirm delivery when status is "${order.status}"`,
       });
     }
 
+    if (order.escrowStatus === "released") {
+      return res.status(200).json({
+        message: "Already confirmed.",
+        order: sanitiseOrder(order),
+      });
+    }
+
     order.status = "delivered";
-    order.deliveredAt = new Date();
+    order.deliveredAt = order.deliveredAt ?? new Date();
     order.deliveryConfirmedAt = new Date();
     order.deliveryConfirmedBy = "buyer";
 
@@ -818,14 +987,13 @@ export const confirmDelivery = async (req, res) => {
     await order.save();
 
     res.status(200).json({
-      message: "Delivery confirmed. Vendor has been paid.",
+      message: "Delivery confirmed. The vendor has been paid.",
       order: sanitiseOrder(order),
     });
 
-    // Notify vendor
     Notification.create({
       user: order.vendor,
-      type: "boost_approved", // reuse existing enum; add "escrow_released" later
+      type: "boost_approved", // reuse existing enum until a money type exists
       title: "Payment released",
       message: `Buyer confirmed delivery. ${sym(order.currency)}${order.vendorPayout.toLocaleString()} added to your balance.`,
       actionUrl: "/vendor/dashboard",
@@ -840,7 +1008,7 @@ export const confirmDelivery = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// POST /orders/:id/refund — buyer requests refund
+// POST /orders/:id/refund — buyer requests, vendor resolves
 // ═══════════════════════════════════════════════════════════════════════
 export const requestRefund = async (req, res) => {
   try {
@@ -854,6 +1022,12 @@ export const requestRefund = async (req, res) => {
       return res.status(403).json({ message: "Not authorised" });
     }
 
+    if (order.refundRequestedAt) {
+      return res.status(409).json({
+        message: "You've already requested a refund on this order.",
+      });
+    }
+
     if (!isRefundEligible(order.refundPolicy, order.status)) {
       return res.status(409).json({
         message:
@@ -861,7 +1035,7 @@ export const requestRefund = async (req, res) => {
       });
     }
 
-    // Extra check for window policy — enforce the day count
+    // Window policy — enforce the day count against delivery
     if (order.refundPolicy?.type === "window" && order.deliveredAt) {
       const days = order.refundPolicy.window ?? 7;
       const cutoff = new Date(order.deliveredAt);
@@ -876,15 +1050,13 @@ export const requestRefund = async (req, res) => {
     order.refundRequestedAt = new Date();
     order.refundReason = reason;
     order.refundNotes = notes ?? "";
-    // We don't change status yet — vendor accepts/rejects from dashboard
     await order.save();
 
     res.status(200).json({
-      message: "Refund request sent to vendor",
+      message: "Refund request sent to the vendor",
       order: sanitiseOrder(order),
     });
 
-    // Notify vendor
     Notification.create({
       user: order.vendor,
       type: "boost_approved",
@@ -901,7 +1073,7 @@ export const requestRefund = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// POST /orders/:id/dispute — buyer escalates a problem
+// POST /orders/:id/dispute — freezes the payout, admin resolves
 // ═══════════════════════════════════════════════════════════════════════
 export const reportDispute = async (req, res) => {
   try {
@@ -915,12 +1087,17 @@ export const reportDispute = async (req, res) => {
       return res.status(403).json({ message: "Not authorised" });
     }
 
-    // Freeze the order — admin resolves manually
     order.escrowStatus = "disputed";
     order.refundReason = reason;
     order.refundNotes = notes ?? "";
     order.refundRequestedAt = new Date();
     await order.save();
+
+    // Freeze the money too — a pending ledger row must not become available
+    await VendorLedger.updateMany(
+      { order: order._id, type: "sale", status: "pending" },
+      { $set: { notes: "Frozen — order disputed" } },
+    );
 
     res.status(200).json({
       message:
@@ -928,16 +1105,14 @@ export const reportDispute = async (req, res) => {
       order: sanitiseOrder(order),
     });
 
-    // Notify admins (send email to ADMIN_EMAILS, non-blocking)
     const adminEmails = (process.env.ADMIN_EMAILS ?? "")
       .split(",")
       .filter(Boolean);
-    if (adminEmails.length) {
-      // Reuse whatever email service you have; skipping detail here.
-      console.log(
-        `[dispute] Order ${order._id} disputed. Reason: ${reason}. Notify: ${adminEmails.join(", ")}`,
-      );
-    }
+    console.error(
+      `[dispute] Order ${order._id} disputed. Reason: ${reason}. ` +
+        `Amount: ${sym(order.currency)}${order.total}. ` +
+        `Notify: ${adminEmails.join(", ") || "(ADMIN_EMAILS not set)"}`,
+    );
   } catch (err) {
     console.error("[reportDispute]", err);
     res.status(500).json({ message: "Failed to report problem" });
@@ -945,21 +1120,19 @@ export const reportDispute = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════
-// INTERNAL HELPERS
+// INTERNAL
 // ═══════════════════════════════════════════════════════════════════════
 
+/** Mark one order paid and write its ledger row. Idempotent. */
 async function markOrderPaid({ order, payment }) {
-  // Idempotency guard — only set once
   if (order.status !== "pending") return;
 
   order.status = "confirmed";
   order.paidAt = new Date();
   order.flwTxId = String(payment.id ?? "");
 
-  // For split_at_source, vendor was already paid at charge time —
-  // record it as an "available" ledger row for our own bookkeeping.
-  // For escrow, ledger stays pending until buyer confirms delivery.
   if (order.paymentModel === "split_at_source") {
+    // Flutterwave already sent the vendor's share at charge time
     order.escrowStatus = "released";
     order.escrowReleasedAt = new Date();
 
@@ -969,7 +1142,7 @@ async function markOrderPaid({ order, payment }) {
       currency: order.currency,
       order: order._id,
       type: "sale",
-      status: "paid_out", // FLW already sent it
+      status: "paid_out",
       notes: "Split-at-source direct payout",
     });
   } else {
@@ -986,13 +1159,12 @@ async function markOrderPaid({ order, payment }) {
 
   await order.save();
 
-  // Notify buyer + vendor
   Promise.all([
     Notification.create({
       user: order.buyer,
       type: "boost_approved",
       title: "Payment received",
-      message: `Your order is confirmed and the vendor has been notified.`,
+      message: "Your order is confirmed and the vendor has been notified.",
       actionUrl: `/orders/${order._id}`,
       actionLabel: "View order",
     }),
@@ -1010,6 +1182,7 @@ async function markOrderPaid({ order, payment }) {
   pushToUser(String(order.vendor), "new_notification", {});
 }
 
+/** Flip this order's held escrow to available in the vendor ledger. */
 async function releaseEscrow({ order, actor }) {
   if (order.escrowStatus !== "held") return;
 
@@ -1020,7 +1193,7 @@ async function releaseEscrow({ order, actor }) {
     order.deliveryConfirmedBy = actor;
   }
 
-  // Flip the pending ledger row to available
+  // Scoped to this order — a sibling order in the same group is untouched
   await VendorLedger.updateMany(
     { order: order._id, type: "sale", status: "pending" },
     {
@@ -1036,13 +1209,17 @@ async function notifyVendorOfNewOrder({ order, ad, vendor, currency }) {
   const vendorFull = await User.findById(vendor._id)
     .select("phone email username")
     .lean();
+
+  const itemCount = (order.items ?? []).length;
+  const itemLabel = itemCount > 1 ? `${itemCount} items` : `"${ad.title}"`;
+
   if (vendorFull?.phone) {
     const isDelivery = ad.category?.main === "delivery";
     const smsBody = isDelivery
       ? `SmileBaba: New delivery booking! ${sym(currency)}${order.total.toLocaleString()}. ` +
         `Route: ${String(order.deliveryAddress || "").slice(0, 80)}. ` +
         `Confirm: https://smilebabahub.com/vendor/orders`
-      : `SmileBaba: New order for "${ad.title}" — ${sym(currency)}${order.total.toLocaleString()}. ` +
+      : `SmileBaba: New order for ${itemLabel} — ${sym(currency)}${order.total.toLocaleString()}. ` +
         `Log in to confirm: https://smilebabahub.com/vendor/orders`;
     sendSMS(vendorFull.phone, smsBody).catch(() => {});
   }
@@ -1074,9 +1251,12 @@ function sanitiseOrder(o) {
   return {
     _id: String(raw._id),
     orderNumber: String(raw._id).slice(-6).toUpperCase(),
+    orderGroup: raw.orderGroup ?? null,
     items: raw.items ?? [],
     subtotal: raw.total ?? 0,
     total: raw.total ?? 0,
+    commissionAmount: raw.commissionAmount ?? 0,
+    vendorPayout: raw.vendorPayout ?? 0,
     currency: raw.currency ?? "GHS",
     symbol: sym(raw.currency ?? "GHS"),
     status: raw.status ?? "pending",
@@ -1088,6 +1268,7 @@ function sanitiseOrder(o) {
     paidAt: raw.paidAt,
     shippedAt: raw.shippedAt,
     deliveredAt: raw.deliveredAt ?? raw.deliveryConfirmedAt,
+    refundRequestedAt: raw.refundRequestedAt ?? null,
     flwTxRef: raw.flwTxRef,
     createdAt: raw.createdAt,
   };

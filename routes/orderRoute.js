@@ -18,6 +18,7 @@ import {
   confirmDelivery,
   requestRefund,
   reportDispute,
+  getOrderGroup,
 } from "../controllers/orderController.js";
 
 const router = express.Router();
@@ -43,6 +44,9 @@ router.patch("/:id/status", authMiddleware, requireVendor, updateOrderStatus);
 router.post("/:id/confirm-delivery", authMiddleware, confirmDelivery);
 router.post("/:id/refund", authMiddleware, requestRefund);
 router.post("/:id/dispute", authMiddleware, reportDispute);
+
+router.post("/group/:groupId/pay", authMiddleware, initOrderPayment);
+router.get("/group/:groupId", authMiddleware, getOrderGroup);
 
 // ── Single order — LAST so /my /mine /vendor aren't matched by /:id ──
 router.get("/:id", authMiddleware, getSingleOrder);
