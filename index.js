@@ -32,6 +32,7 @@ import newsRoutes from "./routes/newsRoutes.js";
 import promotionRoutes from "./routes/promotionRoutes.js";
 import adminPromotionRoutes from './routes/admin-promotions.js'
 import waitlistRoutes from "./routes/waitlist.js";
+import transferRoutes from "./routes/transferRoute.js";
 
 import { authenticate as authMiddleware } from "./middleware/authMiddleWare.js";
 import { checkReferralCode } from "./controllers/paymentController.js";
@@ -296,6 +297,7 @@ app.use("/smilebaba", newsRoutes);
 app.use("/smilebaba/promote", promotionRoutes);
 app.use("/smilebaba/admin/promotions", adminPromotionRoutes);
 app.use("/smilebaba/waitlist", waitlistRoutes);
+app.use("/smilebaba/transfers", transferRoutes);
 
 // ── Health check — used by BackendWakeUp component + uptime monitors ─────
 // Returns 200 immediately — just proves the server is awake.
