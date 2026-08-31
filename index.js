@@ -72,6 +72,7 @@ const WEBHOOK_PATHS = [
   "/smilebaba/orders/gh/webhook",
   "/smilebaba/orders/ng/webhook",
   "/smilebaba/orders/intl/webhook",
+  "/smilebaba/bookings/webhook",
 ];
 WEBHOOK_PATHS.forEach((path) =>
   app.use(path, express.raw({ type: "application/json" })),

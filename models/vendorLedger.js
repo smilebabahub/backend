@@ -44,6 +44,11 @@ const vendorLedgerSchema = new mongoose.Schema(
       enum: ["pending", "available", "paid_out"],
       default: "available",
     },
+    booking: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Booking",
+      index: true,
+    },
     notes: { type: String, default: "" },
 
     // For payouts: which withdrawal batch this ledger row belongs to
