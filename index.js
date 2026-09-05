@@ -44,6 +44,7 @@ import {
   onlineUsers,
   setIO,
 } from "./lib/socketHandler.js";
+import supportRoutes from "./routes/supportRoute.js";
 
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
@@ -91,6 +92,8 @@ const REQUIRED_ENV = [
   "JWT_REFRESH_SECRET",
   "FLW_SECRET_KEY", // OR FLW_SECRET_KEY_GH / FLW_SECRET_KEY_NG
   "FLW_WEBHOOK_SECRET", // OR FLW_WEBHOOK_SECRET_GH / FLW_WEBHOOK_SECRET_NG
+  "EMAIL_USER",
+  "EMAIL_PASS",
 ];
 
 
@@ -299,6 +302,8 @@ app.use("/smilebaba/promote", promotionRoutes);
 app.use("/smilebaba/admin/promotions", adminPromotionRoutes);
 app.use("/smilebaba/waitlist", waitlistRoutes);
 app.use("/smilebaba/transfers", transferRoutes);
+app.use("/smilebaba/support", supportRoutes);
+import { startAccountDeletionCron } from "./cron/accountDeletion.js";
 
 // ── Health check — used by BackendWakeUp component + uptime monitors ─────
 // Returns 200 immediately — just proves the server is awake.
@@ -364,6 +369,7 @@ await connectRedis().catch((e) =>
   console.warn("Redis unavailable — SSE disabled:", e.message),
 );
 startSubscriptionCron();
+startAccountDeletionCron();
 
 // ── 404 + global error ────────────────────────────────────────────────────────
 app.use((_req, res) => res.status(404).json({ message: "Route not found" }));

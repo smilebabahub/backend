@@ -12,6 +12,7 @@ import {
   generateRefreshToken,
 } from "../utils/generateTokens.js";
 import axios from "axios";
+import { cancelDeletionOnLogin } from "./supportController.js";
 
 // ── Real IP + Country resolution ───────────────────────────────────────────
 // Cloudflare sets two headers we can use directly — no Geoapify call needed:
@@ -373,6 +374,7 @@ export const login = async (req, res) => {
       return res
         .status(400)
         .json({ message: "Incorrect username and password" });
+        cancelDeletionOnLogin(user._id).catch(() => {});
 
     // Resolve country robustly — CF header first, stored country fallback, IP fallback
     const liveCountry = await resolveCountryForUser(req, user);
