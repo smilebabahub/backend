@@ -45,6 +45,8 @@ import {
   setIO,
 } from "./lib/socketHandler.js";
 import supportRoutes from "./routes/supportRoute.js";
+import reportRoutes from "./routes/reportRoute.js";
+import { startAccountDeletionCron } from "./cron/accountDeletion.js";
 
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
@@ -303,7 +305,8 @@ app.use("/smilebaba/admin/promotions", adminPromotionRoutes);
 app.use("/smilebaba/waitlist", waitlistRoutes);
 app.use("/smilebaba/transfers", transferRoutes);
 app.use("/smilebaba/support", supportRoutes);
-import { startAccountDeletionCron } from "./cron/accountDeletion.js";
+app.use("/smilebaba/reports", reportRoutes);
+
 
 // ── Health check — used by BackendWakeUp component + uptime monitors ─────
 // Returns 200 immediately — just proves the server is awake.

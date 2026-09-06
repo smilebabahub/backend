@@ -41,7 +41,7 @@ export function startAutoPayoutCron() {
 
     console.log("[autoPayout] run complete");
   });
-
+  // cron.schedule("0 2 * * *", runPayouts, { timezone: "Africa/Accra" });
   console.log("[autoPayout] scheduler registered (runs daily at 2am)");
 }
 
