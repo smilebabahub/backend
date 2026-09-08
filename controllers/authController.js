@@ -158,6 +158,7 @@ const serializeUser = (user, liveCountry) => {
     storeBanner: obj.storeBanner ?? "",
     storeLogo: obj.storeLogo ?? "",
     businessType: obj.businessType ?? "individual",
+    storeAddress: obj.storeAddress ?? "",
 
     // ── Social ────────────────────────────────────────────────────────────
     instagram: obj.instagram ?? "",
@@ -178,6 +179,9 @@ const serializeUser = (user, liveCountry) => {
     // ── Subscription ──────────────────────────────────────────────────────
     subscription: sub,
     isSubscribed: subActive,
+    vendorServices: obj.vendorServices ?? [],
+    vendorSince: obj.vendorSince ?? null,
+    commissionAcknowledgedAt: obj.commissionAcknowledgedAt ?? null,
 
     // ── Payout / payments ─────────────────────────────────────────────────
     payoutMethod: obj.payoutMethod ?? "momo",
@@ -370,11 +374,15 @@ export const login = async (req, res) => {
     if (!user) return res.status(400).json({ message: "Invalid credentials" });
 
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch)
+    if (!isMatch) {
       return res
         .status(400)
         .json({ message: "Incorrect username and password" });
-        cancelDeletionOnLogin(user._id).catch(() => {});
+    }
+
+    // The deletion confirmation email promises that signing in cancels
+    // a pending request. This is what keeps that promise.
+    cancelDeletionOnLogin(user._id).catch(() => {});
 
     // Resolve country robustly — CF header first, stored country fallback, IP fallback
     const liveCountry = await resolveCountryForUser(req, user);

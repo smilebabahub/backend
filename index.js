@@ -47,6 +47,7 @@ import {
 import supportRoutes from "./routes/supportRoute.js";
 import reportRoutes from "./routes/reportRoute.js";
 import { startAccountDeletionCron } from "./cron/accountDeletion.js";
+import onboardingRoutes from "./routes/vendorOnboardingRoute.js";
 
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
@@ -306,6 +307,7 @@ app.use("/smilebaba/waitlist", waitlistRoutes);
 app.use("/smilebaba/transfers", transferRoutes);
 app.use("/smilebaba/support", supportRoutes);
 app.use("/smilebaba/reports", reportRoutes);
+app.use("/smilebaba/onboarding", onboardingRoutes);
 
 
 // ── Health check — used by BackendWakeUp component + uptime monitors ─────

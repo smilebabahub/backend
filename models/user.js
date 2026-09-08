@@ -187,6 +187,8 @@ const userSchema = new Schema(
       enum: ["individual", "registered", "enterprise", ""],
       default: "individual",
     },
+    storeAddress: { type: String, default: "" },
+    vendorServices: [{ type: String }],
 
     // ── Social ─────────────────────────────────────────────────────────────────
     instagram: { type: String, default: "" },
@@ -245,6 +247,7 @@ const userSchema = new Schema(
 
     // ── Subscription ───────────────────────────────────────────────────────────
     subscription: { type: subscriptionSchema, default: () => ({}) },
+    commissionAcknowledgedAt: { type: Date, default: null },
 
     // ── Payout / payments ──────────────────────────────────────────────────────
     payoutMethod: {
