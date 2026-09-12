@@ -22,6 +22,7 @@ import VendorOnboarding from "../models/vendorOnboardingModel.js";
 import User from "../models/user.js";
 import Ad from "../models/adModel.js";
 import { notify } from "../lib/notify.js";
+import { PLAN_NAMES, getPlanDurationDays } from "../config/pricing.js";
 
 const COMMISSION_RATE = 0.05;
 
@@ -413,8 +414,9 @@ export const saveStep = async (req, res) => {
 export const completeOnboarding = async (req, res) => {
   try {
     const record = await VendorOnboarding.findOne({ user: req.user.userId });
-    if (!record)
+    if (!record) {
       return res.status(404).json({ message: "Start onboarding first" });
+    }
 
     if (record.status === "complete") {
       return res.status(200).json({ message: "You're already set up." });
@@ -426,7 +428,9 @@ export const completeOnboarding = async (req, res) => {
     }
 
     const user = await User.findById(req.user.userId)
-      .select("role storeName storeSlug storeCategory")
+      .select(
+        "role storeName storeSlug storeCategory subscription isSubscribed",
+      )
       .lean();
 
     const missing = computeMissing(user, record);
@@ -443,13 +447,46 @@ export const completeOnboarding = async (req, res) => {
     record.completedAt = new Date();
     await record.save();
 
-    // Belt and braces: role should already be vendor from step 3, and the
-    // slug from step 4. Setting them again costs nothing and covers the
-    // case where someone reached here through a resumed session.
+    // ── Bring the account up to the same state /subscription would ──
     const patch = { vendorSince: new Date() };
-    if (user.role !== "admin" && user.role !== "vendor") patch.role = "vendor";
+
+    if (user.role !== "admin" && user.role !== "vendor") {
+      patch.role = "vendor";
+    }
     if (!user.storeSlug) {
       patch.storeSlug = await makeStoreSlug(user.storeName, req.user.userId);
+    }
+
+    // Only write a plan if they don't already have a live one. Someone
+    // who paid for SuperSmile and then walked through onboarding must not
+    // be quietly demoted to Basic.
+    const existingPlan = user.subscription?.plan;
+    const planStillLive =
+      existingPlan &&
+      existingPlan !== "Basic" &&
+      user.subscription?.expiresAt &&
+      new Date(user.subscription.expiresAt) > new Date();
+
+    if (!planStillLive) {
+      const now = new Date();
+      const days = getPlanDurationDays("Basic");
+
+      patch.subscription = {
+        plan: "Basic",
+        billingCycle: "monthly",
+        price: 0,
+        currency: user.country === "Nigeria" ? "NGN" : "GHS",
+        startedAt: now,
+        // Matches what activateSubscription writes for a free activation
+        expiresAt: new Date(now.getTime() + days * 86_400_000),
+        referredBy: user.subscription?.referredBy ?? null,
+        status: "active",
+      };
+
+      // isSubscribed means "on a paid plan" everywhere else in the
+      // codebase — vendorTier=high, the VERIFIED badge, contact gating.
+      // A free vendor is not that, so it stays false.
+      patch.isSubscribed = false;
     }
 
     await User.updateOne({ _id: req.user.userId }, { $set: patch });
@@ -476,6 +513,8 @@ export const completeOnboarding = async (req, res) => {
     res.status(500).json({ message: "Couldn't finish setting you up" });
   }
 };
+
+ 
 
 // ═══════════════════════════════════════════════════════════════════════
 // GET /onboarding/vendors  (admin)
