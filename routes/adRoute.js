@@ -43,6 +43,7 @@ router.get("/:id", getAdById); // GET    /ads/:id
 router.patch("/:id", authMiddleware, updateAd); // PATCH  /ads/:id
 router.delete("/:id", authMiddleware, deleteAd); // DELETE /ads/:id
 
+
 // ── Authenticated (any logged-in user) ─────────────────────────────────────
 router.post("/:id/contact-click", authMiddleware, recordContactClick); // POST /ads/:id/contact-click
 
