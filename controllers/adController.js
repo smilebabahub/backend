@@ -2,6 +2,9 @@
 import { logError } from "../lib/errorLog.js";
 import mongoose from "mongoose";
 import Ad from "../models/adModel.js";
+import CallbackRequest from "../models/callbackRequestModel.js";
+import { notify } from "../lib/notify.js";
+import { sendAdminDirectEmail } from "../lib/emailService.js";
 import User from "../models/user.js";
 import Notification from "../models/notificationModel.js";
 import {
@@ -29,6 +32,9 @@ export const PLAN_PRIORITY = {
   standard: 1, // BasicSmile   — 5 ads, 30d
   Basic: 0, // Smile (free) — 1 ad, 3d
 };
+
+const clean = (v, max = 300) =>
+  typeof v === "string" ? v.trim().slice(0, max) : undefined;
 
 function getExpiryDate(planId) {
   const days = getPlanDurationDays(planId);
@@ -1081,6 +1087,9 @@ export const moderateAd = async (req, res) => {
   }
 };
 
+
+
+
 // ── SEARCH SUGGESTIONS (autocomplete) ─────────────────────────────────────
 // GET /ads/suggestions?q=toyota
 export const getSearchSuggestions = async (req, res) => {
@@ -1110,5 +1119,186 @@ export const getSearchSuggestions = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch suggestions" });
+  }
+};
+
+
+
+
+export const requestCallback = async (req, res) => {
+  try {
+    const name = clean(req.body.name, 120);
+    const phone = clean(req.body.phone, 40);
+    const message = clean(req.body.message, 500);
+
+    if (!name || name.length < 2) {
+      return res.status(400).json({ message: "Please give your name." });
+    }
+    if (!phone || phone.replace(/\D/g, "").length < 7) {
+      return res.status(400).json({
+        message: "That phone number doesn't look right.",
+      });
+    }
+
+    const ad = await Ad.findById(req.params.id)
+      .populate("postedBy", "username storeName email phone")
+      .lean();
+
+    if (!ad) {
+      return res
+        .status(404)
+        .json({ message: "That listing no longer exists." });
+    }
+
+    if (ad.isSold || ad.isPaused || ad.isActive === false) {
+      return res.status(409).json({
+        message:
+          "This listing isn't active, so the seller won't see a request.",
+        code: "LISTING_INACTIVE",
+      });
+    }
+
+    const vendorId = ad.postedBy?._id;
+    if (!vendorId) {
+      return res
+        .status(400)
+        .json({ message: "This listing has no seller attached." });
+    }
+
+    // Asking to be called about your own listing is a mistake, not a lead
+    if (req.user?.userId && String(vendorId) === String(req.user.userId)) {
+      return res.status(400).json({ message: "That's your own listing." });
+    }
+
+    // Three an hour is plenty for a real person, and stops a listing
+    // being buried under someone's bad afternoon
+    const recent = await CallbackRequest.countDocuments({
+      ad: ad._id,
+      phone,
+      createdAt: { $gt: new Date(Date.now() - 3_600_000) },
+    });
+    if (recent >= 3) {
+      return res.status(429).json({
+        message:
+          "You've already asked for a call on this listing. Give them a little time.",
+      });
+    }
+
+    const request = await CallbackRequest.create({
+      ad: ad._id,
+      vendor: vendorId,
+      requestedBy: req.user?.userId,
+      name,
+      phone,
+      message,
+      adTitle: ad.title,
+      ip: req.clientIp ?? req.ip,
+    });
+
+    res.status(201).json({
+      message: "The seller has your number and will call you back.",
+      reference: String(request._id).slice(-6).toUpperCase(),
+    });
+
+    // ── Everything below is non-blocking ─────────────────────────────
+
+    // The number is the point, so it goes in the message itself rather
+    // than behind a tap
+    notify({
+      userId: vendorId,
+      type: "new_message",
+      title: "Someone wants a call back",
+      message: `${name} asked you to call about "${ad.title}". ${phone}`,
+      actionUrl: `/vendor/callbacks`,
+      actionLabel: "See the request",
+      dedupeKey: `callback-${request._id}`,
+      push: true,
+    }).catch((e) => console.error("[callback] notify:", e.message));
+
+    if (ad.postedBy?.email) {
+      sendAdminDirectEmail({
+        to: ad.postedBy.email,
+        name: ad.postedBy.storeName ?? ad.postedBy.username,
+        subject: `Call back request — ${ad.title}`,
+        message:
+          `${name} would like you to call them about your listing "${ad.title}".\n\n` +
+          `Phone: ${phone}\n` +
+          (message ? `\nThey said: ${message}\n` : "") +
+          `\nCall them back soon — buyers who ask for a call are usually ready to buy.`,
+      }).catch((e) => console.error("[callback] email:", e.message));
+    }
+  } catch (err) {
+    console.error("[requestCallback]", err);
+    res.status(500).json({ message: "Couldn't send that request." });
+  }
+};
+
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// GET /ads/callbacks/mine   — the vendor's own requests
+// ═══════════════════════════════════════════════════════════════════════
+export const getMyCallbacks = async (req, res) => {
+  try {
+    const { status, page = 1, limit = 30 } = req.query;
+
+    const filter = { vendor: req.user.userId };
+    if (status && status !== "all") filter.status = status;
+
+    const [total, items, newCount] = await Promise.all([
+      CallbackRequest.countDocuments(filter),
+      CallbackRequest.find(filter)
+        .sort({ createdAt: -1 })
+        .skip((Number(page) - 1) * Number(limit))
+        .limit(Number(limit))
+        .populate("ad", "title slug images coverImage price")
+        .lean(),
+      CallbackRequest.countDocuments({
+        vendor: req.user.userId,
+        status: "new",
+      }),
+    ]);
+
+    res.status(200).json({
+      callbacks: items,
+      newCount,
+      meta: { total, page: Number(page), limit: Number(limit) },
+    });
+  } catch (err) {
+    console.error("[getMyCallbacks]", err);
+    res.status(500).json({ message: "Couldn't load your call back requests" });
+  }
+};
+
+// ═══════════════════════════════════════════════════════════════════════
+// PATCH /ads/callbacks/:id   — mark called, or note the outcome
+// ═══════════════════════════════════════════════════════════════════════
+export const updateCallback = async (req, res) => {
+  try {
+    const { status, note } = req.body;
+    const valid = ["new", "called", "no_answer", "closed"];
+    if (status && !valid.includes(status)) {
+      return res.status(400).json({ message: "Invalid status" });
+    }
+
+    const request = await CallbackRequest.findOne({
+      _id: req.params.id,
+      vendor: req.user.userId,
+    });
+    if (!request) return res.status(404).json({ message: "Not found" });
+
+    if (status) {
+      request.status = status;
+      if (status === "called" && !request.calledAt) {
+        request.calledAt = new Date();
+      }
+    }
+    if (note !== undefined) request.vendorNote = clean(note, 500);
+
+    await request.save();
+    res.status(200).json({ callback: request });
+  } catch (err) {
+    console.error("[updateCallback]", err);
+    res.status(500).json({ message: "Couldn't update that request" });
   }
 };

@@ -14,6 +14,9 @@ import {
   getMyAds,
   moderateAd,
   getSearchSuggestions,
+  requestCallback,
+  getMyCallbacks,
+  updateCallback,
 } from "../controllers/adController.js";
 import { requireVendor } from "../middleware/requireVendo.js";
 import authMiddleware from "../middleware/authMiddleWare.js";
@@ -24,10 +27,13 @@ const router = express.Router();
 router.get("/", getAds); // GET /ads
 router.get("/suggestions", getSearchSuggestions); // GET /ads/suggestions?q=
 router.get("/slug/:slug", getAdBySlug); // GET /ads/slug/:slug
+router.post("/:id/callback", requestCallback);
 
 // ── Vendor-only — must come BEFORE /:id or Express reads "my" as the id ───
 router.get("/my", authMiddleware, requireVendor, getMyAds); // GET    /ads/my
 router.post("/", authMiddleware, requireVendor, createAd); // POST   /ads
+router.get("/callbacks/mine", authMiddleware, getMyCallbacks);
+router.patch("/callbacks/:id", authMiddleware, updateCallback);
 router.post("/:id/boost", authMiddleware, requireVendor, boostAd); // POST   /ads/:id/boost
 router.patch("/:id/sold", authMiddleware, requireVendor, markAsSold); // PATCH  /ads/:id/sold
 router.patch("/:id/pause", authMiddleware, requireVendor, togglePause); // PATCH  /ads/:id/pause

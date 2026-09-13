@@ -636,6 +636,15 @@ export const verifyPayment = async (req, res) => {
       }),
     );
 
+    if (payment.status === "cancelled") {
+      // Not a failure — they changed their mind. Nothing to record, and
+      // nothing to apologise for.
+      return res.redirect(
+        `${process.env.NEXT_PUBLIC_APP_URL}/payment-failed?reason=cancelled` +
+          (planId ? `&plan=${planId}` : ""),
+      );
+    }
+
     if (payment.status !== "successful") {
       console.warn("[verifyPayment] not successful:", payment.status);
       // Record failed attempt so admin can see it
