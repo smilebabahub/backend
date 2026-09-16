@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 
+
 const notificationSchema = new mongoose.Schema(
   {
     user: {
@@ -38,9 +39,12 @@ const notificationSchema = new mongoose.Schema(
 
 // Index for fast unread counts per user
 notificationSchema.index({ user: 1, isRead: 1 });
+notificationSchema.index({ dedupeKey: 1 }, { unique: true, sparse: true });
 
 const Notification =
   mongoose.models.Notification ||
   mongoose.model("Notification", notificationSchema);
+
+ 
 
 export default Notification;

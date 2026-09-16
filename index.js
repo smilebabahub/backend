@@ -48,6 +48,8 @@ import supportRoutes from "./routes/supportRoute.js";
 import reportRoutes from "./routes/reportRoute.js";
 import { startAccountDeletionCron } from "./cron/accountDeletion.js";
 import onboardingRoutes from "./routes/vendorOnboardingRoute.js";
+import { createAdapter } from "@socket.io/redis-adapter";
+
 
 
 // ── Setup ─────────────────────────────────────────────────────────────────────

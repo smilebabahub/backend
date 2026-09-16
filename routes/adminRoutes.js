@@ -30,6 +30,12 @@ import {
   getSystemErrors,
   clearSystemErrors,
 } from "../controllers/adminController.js";
+import {
+  createBroadcast,
+  previewAudience,
+  getBroadcasts,
+  resumeBroadcast,
+} from "../controllers/broadcastController.js";
 
 const router = express.Router();
 router.use(authenticate, requireAdmin);
@@ -65,6 +71,11 @@ router.get("/system/health", authenticate, requireAdmin, getSystemHealth);
 router.get("/system/report", authenticate, requireAdmin, generateReport);
 router.get("/system/errors", authenticate, requireAdmin, getSystemErrors);
 router.delete("/system/errors", authenticate, requireAdmin, clearSystemErrors);
+
+router.get("/broadcasts", authenticate, getBroadcasts);
+router.get("/broadcasts/preview", authenticate, previewAudience);
+router.post("/broadcasts", authenticate, createBroadcast);
+router.post("/broadcasts/:id/resume", authenticate, resumeBroadcast);
 
 // ── /admin/live — legacy endpoint that some clients call directly ──────────
 // Accepts ?token= query param since EventSource can't send headers.
