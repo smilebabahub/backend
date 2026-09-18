@@ -4,7 +4,10 @@ import bcrypt from "bcryptjs";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import nodemailer from "nodemailer";
-import { sendRegistrationEmails } from "../lib/emailService.js";
+import {
+  sendRegistrationEmails,
+  sendPasswordResetEmail,
+} from "../lib/emailService.js";
 import { validateEmail } from "../lib/validateEmail.js";
 import { blacklistToken } from "../lib/redis.js";
 import {
@@ -99,6 +102,22 @@ const ADMIN_EMAILS = new Set(
 );
 
 const isAdminEmail = (email = "") => ADMIN_EMAILS.has(email.toLowerCase());
+
+/**
+ * Ten minutes.
+ *
+ * Long enough for someone to find the email, short enough that a link
+ * left in an inbox isn't a standing key to the account. If you change
+ * it, change the copy on the reset pages too — they currently say an
+ * hour, which is a promise the code doesn't keep.
+ */
+const RESET_WINDOW_MS = 10 * 60 * 1000;
+ 
+const SITE = (
+  process.env.NEXT_PUBLIC_APP_URL ??
+  process.env.FRONTEND_URL ??
+  "https://www.smilebabahub.com"
+).replace(/\/+$/, "");
 
 // serializeUser — builds the user object sent to the frontend.
 // liveCountry: pass the country resolved from cf-ipcountry on this request.
@@ -528,77 +547,147 @@ export const logout = async (req, res) => {
   }
 };
 
-// ── FORGOT PASSWORD ────────────────────────────────────────────────────────
+
 export const forgotPassword = async (req, res) => {
+  // The same sentence whatever happens. An attacker learns nothing from
+  // the response, and a real user isn't shown our infrastructure
+  // problems.
+  const SAME_ANSWER = {
+    message: "If an account exists for that address, we've sent a reset link.",
+  };
+ 
   try {
-    const { email } = req.body;
-    const findUser = await User.findOne({ email });
-
-    if (!findUser) return res.status(404).json({ message: "User not found" });
-
+    const email = String(req.body.email ?? "").trim().toLowerCase();
+ 
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ message: "Enter a valid email address." });
+    }
+ 
+    const user = await User.findOne({ email }).select(
+      "_id email username isActive",
+    );
+ 
+    // Answer identically for an address with no account. Timing differs
+    // slightly either way, but the response doesn't — and that's the
+    // part anyone would actually scrape.
+    if (!user || user.isActive === false) {
+      return res.status(200).json(SAME_ANSWER);
+    }
+ 
+    // Raw token in the email, hash in the database — same reasoning as a
+    // password. If the database leaks, the tokens in it are useless.
     const resetToken = crypto.randomBytes(32).toString("hex");
     const hashedToken = crypto
       .createHash("sha256")
       .update(resetToken)
       .digest("hex");
-
-    findUser.passwordResetToken = hashedToken;
-    findUser.passwordResetExpires = Date.now() + 10 * 60 * 1000;
-    await findUser.save();
-
-    const resetURL = `${process.env.NEXT_PUBLIC_APP_URL}/reset-password/${resetToken}`;
-
-    const transporter = nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 587,
-      secure: false,
-      auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-      tls: { rejectUnauthorized: false },
-      family: 4,
+ 
+    user.passwordResetToken = hashedToken;
+    user.passwordResetExpires = Date.now() + RESET_WINDOW_MS;
+    await user.save();
+ 
+    // Query param, because that's what the page reads
+    const resetUrl = `${SITE}/auth/reset-password?token=${resetToken}`;
+ 
+    // Respond first. A slow or failing SMTP connection is ours to fix,
+    // not something to hold a request open for — and a 500 here would
+    // tell an attacker the address was real.
+    res.status(200).json(SAME_ANSWER);
+ 
+    sendPasswordResetEmail({
+      email: user.email,
+      username: user.username,
+      resetUrl,
+      expiresInMinutes: RESET_WINDOW_MS / 60_000,
+    }).catch((err) => {
+      // Worth shouting about. The token is saved, so the person is
+      // waiting for an email that isn't coming.
+      console.error(
+        `[forgot-password] EMAIL FAILED for ${user.email}: ${err.message}`,
+      );
     });
-
-    await transporter.sendMail({
-      from: process.env.EMAIL_USER,
-      to: findUser.email,
-      subject: "Password Reset Request",
-      html: `<p>Click this link to reset your password: <a href="${resetURL}">${resetURL}</a></p>`,
-    });
-
-    res.status(200).json({
-      message:
-        "If an account exists for that address, we've sent a reset link.",
-    });
-    sendPasswordResetEmail({ email, username, resetURL });
-  } catch (error) {
-    console.error("[forgot-password] email failed:", error.message);
+  } catch (err) {
+    console.error("[forgotPassword]", err);
+ 
+    // The old version returned nothing here, so the request hung until
+    // the client gave up
+    if (!res.headersSent) {
+      res.status(500).json({ message: "Something went wrong. Please try again." });
+    }
   }
 };
-
-// ── RESET PASSWORD ─────────────────────────────────────────────────────────
+ 
+// ═══════════════════════════════════════════════════════════════════════
+// POST /auth/reset-password
+// ═══════════════════════════════════════════════════════════════════════
 export const resetPassword = async (req, res) => {
   try {
     const { token, password } = req.body;
-    const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
-
+ 
+    if (!token || !password) {
+      return res.status(400).json({ message: "Missing token or password." });
+    }
+ 
+    if (String(password).length < 8) {
+      return res.status(400).json({
+        message: "Use at least 8 characters.",
+      });
+    }
+ 
+    const hashedToken = crypto
+      .createHash("sha256")
+      .update(String(token))
+      .digest("hex");
+ 
     const user = await User.findOne({
       passwordResetToken: hashedToken,
       passwordResetExpires: { $gt: Date.now() },
     });
-
-    if (!user)
-      return res.status(400).json({ message: "Token is invalid or expired" });
-
-    user.password = await bcrypt.hash(password, 10);
+ 
+    if (!user) {
+      return res.status(400).json({
+        message: "This link has expired or has already been used.",
+        code: "INVALID_TOKEN",
+      });
+    }
+ 
+    // Stop someone resetting to the password they're already using —
+    // usually a sign they've misread the email and don't realise
+    // nothing changed
+    const same = await bcrypt.compare(String(password), user.password ?? "");
+    if (same) {
+      return res.status(400).json({
+        message: "That's your current password. Choose a different one.",
+      });
+    }
+ 
+    user.password = await bcrypt.hash(String(password), 10);
     user.passwordResetToken = undefined;
     user.passwordResetExpires = undefined;
+ 
+    // Anyone holding an old refresh token loses it. If the reset happened
+    // because someone else had access, this is the part that actually
+    // removes them.
+    user.refreshTokens = [];
+    user.passwordChangedAt = new Date();
+ 
     await user.save();
-
-    res.json({ message: "Password reset successful" });
-  } catch (error) {
-    console.log(error);
-    res.status(500).json({ message: "Server error" });
+ 
+    res.status(200).json({ message: "Password reset successful" });
+ 
+    // Tell them it happened. If it wasn't them, this is how they find
+    // out in time to do something about it.
+    sendPasswordChangedEmail?.({
+      email: user.email,
+      username: user.username,
+      at: new Date(),
+    }).catch(() => {});
+  } catch (err) {
+    console.error("[resetPassword]", err);
+    res.status(500).json({ message: "Something went wrong. Please try again." });
   }
 };
+ 
 
 // ── GUEST LOCATION — GET /auth/guest-location ──────────────────────────────
 // Returns country + currency for unauthenticated visitors based on their IP.

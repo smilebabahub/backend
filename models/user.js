@@ -304,6 +304,7 @@ const userSchema = new Schema(
     resetToken: { type: String, default: null },
     resetExpires: { type: Date, default: null },
     isActive: { type: Boolean, default: true },
+    passwordChangedAt: { type: Date, default: null },
   },
   {
     timestamps: true,
