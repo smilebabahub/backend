@@ -564,10 +564,13 @@ export const forgotPassword = async (req, res) => {
       html: `<p>Click this link to reset your password: <a href="${resetURL}">${resetURL}</a></p>`,
     });
 
-    res.json({ message: "Password reset email sent" });
+    res.status(200).json({
+      message:
+        "If an account exists for that address, we've sent a reset link.",
+    });
+    sendPasswordResetEmail({ email, username, resetURL });
   } catch (error) {
-    console.log(error);
-    res.status(500).json({ message: "Server error" });
+    console.error("[forgot-password] email failed:", error.message);
   }
 };
 
